@@ -8,6 +8,11 @@ use std::process::Command;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() >= 2 && (args[1] == "--version" || args[1] == "-v") {
+        println!("BroLang Compiler v1.0.0");
+        std::process::exit(0);
+    }
+
     if args.len() < 2 {
         eprintln!("\x1b[1;36mBroLang Compiler v1.0.0\x1b[0m");
         eprintln!("Usage: {} <input_file.bro>", args[0]);

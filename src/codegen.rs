@@ -779,7 +779,7 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
                 func_name: name.clone(),
             };
             
-            functions_asm.push_str(&format!("{}:\n", name));
+            functions_asm.push_str(&format!("fn_{}:\n", name));
             functions_asm.push_str("  push rbp\n");
             functions_asm.push_str("  mov rbp, rsp\n");
             functions_asm.push_str(&format!("  sub rsp, {}\n", reservation_size));
@@ -1238,7 +1238,7 @@ fn codegen_expr_with_ctx(
             }
             
             // 3. Perform function call
-            asm.push_str(&format!("  call {}\n", name));
+            asm.push_str(&format!("  call fn_{}\n", name));
         }
         Expr::Binary { op, left, right } => {
             codegen_expr_with_ctx(left, asm, string_map, depth, label_counter, ctx, function_signatures);

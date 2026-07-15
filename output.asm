@@ -14,14 +14,14 @@ start:
   mov rax, 6
   push rax
   pop rcx
-  call fib
+  call fn_fib
   mov rdx, rax
   mov rcx, fmt_int
   call [printf]
   mov rcx, 0
   call [ExitProcess]
 
-fib:
+fn_fib:
   push rbp
   mov rbp, rsp
   sub rsp, 48
@@ -46,7 +46,7 @@ fib:
   mov rax, r10
   push rax
   pop rcx
-  call fib
+  call fn_fib
   mov [rbp - 8], rax
   mov rax, [rbp + 16]
   push rax
@@ -56,7 +56,7 @@ fib:
   mov rax, r10
   push rax
   pop rcx
-  call fib
+  call fn_fib
   mov [rbp - 16], rax
   mov rax, [rbp - 8]
   push rax
