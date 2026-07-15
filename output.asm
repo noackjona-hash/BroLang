@@ -6,42 +6,65 @@ section '.data' data readable writeable
   fmt_str db '%s', 13, 10, 0
   fmt_int_in db '%lld', 0
   fmt_str_in db '%s', 0
-  var_z dq 0
 
 section '.text' code readable executable
 start:
   sub rsp, 40
 
-  mov rax, 12
+  mov rax, 6
   push rax
-  mov rax, 18
-  push rax
-  pop rdx
   pop rcx
-  call addiere
-  mov [var_z], rax
-  mov rax, [var_z]
+  call fib
   mov rdx, rax
   mov rcx, fmt_int
   call [printf]
   mov rcx, 0
   call [ExitProcess]
 
-addiere:
+fib:
   push rbp
   mov rbp, rsp
   sub rsp, 48
   mov [rbp + 16], rcx
-  mov [rbp + 24], rdx
   mov rax, [rbp + 16]
   push rax
-  mov rax, [rbp + 24]
+  mov rax, 1
+  pop r10
+  cmp r10, rax
+  setle al
+  movzx rax, al
+  cmp rax, 0
+  je .L_end_0
+  mov rax, [rbp + 16]
+  jmp .L_epilogue_fib
+.L_end_0:
+  mov rax, [rbp + 16]
+  push rax
+  mov rax, 1
+  pop r10
+  sub r10, rax
+  mov rax, r10
+  push rax
+  pop rcx
+  call fib
+  mov [rbp - 8], rax
+  mov rax, [rbp + 16]
+  push rax
+  mov rax, 2
+  pop r10
+  sub r10, rax
+  mov rax, r10
+  push rax
+  pop rcx
+  call fib
+  mov [rbp - 16], rax
+  mov rax, [rbp - 8]
+  push rax
+  mov rax, [rbp - 16]
   pop r10
   add rax, r10
-  mov [rbp - 8], rax
-  mov rax, [rbp - 8]
-  jmp .L_epilogue_addiere
-.L_epilogue_addiere:
+  jmp .L_epilogue_fib
+.L_epilogue_fib:
   mov rsp, rbp
   pop rbp
   ret
