@@ -42,6 +42,7 @@ pub enum Expr {
     Random,
     Alert { title: Box<Expr>, message: Box<Expr> },
     Window { title: Box<Expr>, width: Box<Expr>, height: Box<Expr> },
+    Call { name: String, args: Vec<Expr> },
     Binary {
         op: Op,
         left: Box<Expr>,
@@ -66,6 +67,12 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    FnDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    Return(Option<Expr>),
     Expr(Expr),
 }
 
@@ -346,6 +353,148 @@ impl<'a> Parser<'a> {
                 self.expect_statement_end("end of while block")?;
                 Ok(Stmt::While { cond, body })
             }
+            Token::Fn => {
+                self.advance(); // consume 'fn' / 'funktion'
+                let name_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected function name after 'fn' / 'funktion'.".to_string(),
+                    line: mt.line,
+                    column: mt.column + mt.length + 1,
+                    length: 1,
+                    suggestion: "Specify a function name, e.g., 'fn add(a, b)'.".to_string(),
+                })?;
+                let name = match &name_mt.token {
+                    Token::Ident(s) => {
+                        let s = s.clone();
+                        self.advance();
+                        s
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: format!("Expected function name after 'fn' / 'funktion', but found {}.", name_mt.token.to_string_representation()),
+                            line: name_mt.line,
+                            column: name_mt.column,
+                            length: name_mt.length,
+                            suggestion: "Function names must start with a letter and contain only letters, numbers, or underscores.".to_string(),
+                        });
+                    }
+                };
+
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: format!("Expected '(' after function name '{}'.", name),
+                    line: name_mt.line,
+                    column: name_mt.column + name_mt.length,
+                    length: 1,
+                    suggestion: format!("Specify parameter list in parentheses, e.g., 'fn {}(a, b)'.", name),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after function name '{}', but found {}.", name, lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: format!("Specify parameter list in parentheses, e.g., 'fn {}(a, b)'.", name),
+                    });
+                }
+
+                let mut params = Vec::new();
+                while let Some(p_mt) = self.peek() {
+                    if p_mt.token == Token::RParen {
+                        break;
+                    }
+                    let p_name = match &p_mt.token {
+                        Token::Ident(s) => s.clone(),
+                        _ => {
+                            return Err(ParseError {
+                                message: format!("Expected parameter name or ')', but found {}.", p_mt.token.to_string_representation()),
+                                line: p_mt.line,
+                                column: p_mt.column,
+                                length: p_mt.length,
+                                suggestion: "Parameter names must be standard identifiers.".to_string(),
+                            });
+                        }
+                    };
+                    self.advance();
+                    params.push(p_name);
+
+                    if let Some(next_mt) = self.peek() {
+                        if next_mt.token == Token::Comma {
+                            self.advance();
+                        } else if next_mt.token != Token::RParen {
+                            return Err(ParseError {
+                                message: format!("Expected ',' or ')' after parameter, but found {}.", next_mt.token.to_string_representation()),
+                                line: next_mt.line,
+                                column: next_mt.column,
+                                length: next_mt.length,
+                                suggestion: "Separate function parameters with a comma, e.g., 'fn add(a, b)'.".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' after parameter list.".to_string(),
+                    line: name_mt.line,
+                    column: name_mt.column + name_mt.length + 3,
+                    length: 1,
+                    suggestion: "Complete the parameter list with ')', e.g., 'fn add(a, b)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' after parameter list, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Complete the parameter list with ')', e.g., 'fn add(a, b)'.".to_string(),
+                    });
+                }
+
+                self.expect_statement_end("function declaration")?;
+                let body = self.parse_block("fn")?;
+
+                // Check and consume 'end' / 'ende'
+                let end_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected 'end' or 'ende' to close 'fn' / 'funktion' block.".to_string(),
+                    line: mt.line,
+                    column: mt.column,
+                    length: mt.length,
+                    suggestion: "Add 'end' (or 'ende') to terminate the function body.".to_string(),
+                })?;
+                if end_mt.token == Token::End {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected 'end' or 'ende' to close 'fn' / 'funktion' block, but found {}.", end_mt.token.to_string_representation()),
+                        line: end_mt.line,
+                        column: end_mt.column,
+                        length: end_mt.length,
+                        suggestion: "Change this to 'end' / 'ende' to terminate the function body.".to_string(),
+                    });
+                }
+                self.expect_statement_end("end of function block")?;
+
+                Ok(Stmt::FnDef { name, params, body })
+            }
+            Token::Return => {
+                self.advance(); // consume 'return' / 'rueckgabe' / 'zurueck'
+                let has_expr = if let Some(next_mt) = self.peek() {
+                    next_mt.token != Token::Newline && next_mt.token != Token::End
+                } else {
+                    false
+                };
+
+                let expr = if has_expr {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+
+                self.expect_statement_end("return statement")?;
+                Ok(Stmt::Return(expr))
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect_statement_end("expression statement")?;
@@ -445,8 +594,63 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(name) => {
                 let val = name.clone();
-                self.advance();
-                Ok(Expr::Var(val))
+                let ident_tok = self.advance().unwrap().clone();
+                
+                let is_call = if let Some(next_mt) = self.peek() {
+                    next_mt.token == Token::LParen
+                } else {
+                    false
+                };
+
+                if is_call {
+                    self.advance(); // consume '('
+                    
+                    let mut args = Vec::new();
+                    while let Some(a_mt) = self.peek() {
+                        if a_mt.token == Token::RParen {
+                            break;
+                        }
+                        let arg_expr = self.parse_expr()?;
+                        args.push(arg_expr);
+                        
+                        if let Some(next_mt) = self.peek() {
+                            if next_mt.token == Token::Comma {
+                                self.advance();
+                            } else if next_mt.token != Token::RParen {
+                                return Err(ParseError {
+                                    message: format!("Expected ',' or ')' after argument, but found {}.", next_mt.token.to_string_representation()),
+                                    line: next_mt.line,
+                                    column: next_mt.column,
+                                    length: next_mt.length,
+                                    suggestion: "Separate function arguments with a comma, e.g., 'add(5, x)'.".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    
+                    let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                        message: "Expected closing parenthesis ')' after argument list.".to_string(),
+                        line: ident_tok.line,
+                        column: ident_tok.column + ident_tok.length + 2,
+                        length: 1,
+                        suggestion: "Complete the function call with ')', e.g., 'add(5, x)'.".to_string(),
+                    })?;
+                    if rp_mt.token == Token::RParen {
+                        self.advance();
+                    } else {
+                        return Err(ParseError {
+                            message: format!("Expected closing parenthesis ')' after argument list, but found {}.", rp_mt.token.to_string_representation()),
+                            line: rp_mt.line,
+                            column: rp_mt.column,
+                            length: rp_mt.length,
+                            suggestion: "Close the function call, e.g., 'add(5, x)'.".to_string(),
+                        });
+                    }
+                    
+                    Ok(Expr::Call { name: val, args })
+                } else {
+                    Ok(Expr::Var(val))
+                }
             }
             Token::LParen => {
                 self.advance(); // consume '('

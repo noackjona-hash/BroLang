@@ -13,6 +13,8 @@ pub enum Token {
     Alert,
     Window,
     Comma,
+    Fn,
+    Return,
     Ident(String),
     IntLit(i64),
     StrLit(String),
@@ -48,6 +50,8 @@ impl Token {
             Token::Alert => "alert/info".to_string(),
             Token::Window => "window/fenster".to_string(),
             Token::Comma => ",".to_string(),
+            Token::Fn => "fn/funktion".to_string(),
+            Token::Return => "return/rueckgabe/zurueck".to_string(),
             Token::Ident(s) => format!("identifier '{}'", s),
             Token::IntLit(n) => format!("integer literal '{}'", n),
             Token::StrLit(s) => format!("string literal \"{}\"", s),
@@ -220,6 +224,8 @@ impl Lexer {
                     "random" => Token::Random,
                     "alert" => Token::Alert,
                     "window" => Token::Window,
+                    "fn" => Token::Fn,
+                    "return" => Token::Return,
 
                     // German keywords
                     "setze" => Token::Set,
@@ -234,6 +240,8 @@ impl Lexer {
                     "zufall" => Token::Random,
                     "info" => Token::Alert,
                     "fenster" => Token::Window,
+                    "funktion" => Token::Fn,
+                    "rueckgabe" | "zurueck" => Token::Return,
 
                     // Generic Identifier
                     _ => Token::Ident(ident_str),
