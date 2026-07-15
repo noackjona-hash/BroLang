@@ -45,6 +45,8 @@ pub enum Expr {
     Call { name: String, args: Vec<Expr> },
     ListLiteral(Vec<Expr>),
     ListIndex { list: Box<Expr>, index: Box<Expr> },
+    DictLiteral(Vec<(Expr, Expr)>),
+    ReadFile(Box<Expr>),
     Binary {
         op: Op,
         left: Box<Expr>,
@@ -78,6 +80,21 @@ pub enum Stmt {
     Append {
         list: Expr,
         item: Expr,
+    },
+    WriteFile {
+        filename: Expr,
+        content: Expr,
+    },
+    TryCatch {
+        try_block: Vec<Stmt>,
+        catch_block: Vec<Stmt>,
+    },
+    IndexAssign {
+        list: String,
+        index: Expr,
+        value: Expr,
+        name_line: usize,
+        name_col: usize,
     },
     Expr(Expr),
 }
@@ -200,11 +217,11 @@ impl<'a> Parser<'a> {
 
         match &mt.token {
             Token::Set => {
-                self.advance(); // consume 'set'
+                let set_tok = self.advance().unwrap().clone();
                 let name_mt = self.peek().cloned().ok_or_else(|| ParseError {
                     message: "Expected variable name after 'set'/'setze'.".to_string(),
-                    line: mt.line,
-                    column: mt.column + mt.length + 1,
+                    line: set_tok.line,
+                    column: set_tok.column + set_tok.length + 1,
                     length: 1,
                     suggestion: "Specify a variable name, e.g., 'set counter to 5'.".to_string(),
                 })?;
@@ -225,6 +242,35 @@ impl<'a> Parser<'a> {
                         });
                     }
                 };
+
+                let mut is_index = false;
+                let mut index_expr = None;
+                if let Some(next_mt) = self.peek().cloned() {
+                    if next_mt.token == Token::LBracket {
+                        self.advance(); // consume '['
+                        let idx = self.parse_expr()?;
+                        let rb_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                            message: "Expected closing bracket ']' after index expression.".to_string(),
+                            line: next_mt.line,
+                            column: next_mt.column + 2,
+                            length: 1,
+                            suggestion: "Add a closing bracket ']'.".to_string(),
+                        })?;
+                        if rb_mt.token == Token::RBracket {
+                            self.advance();
+                        } else {
+                            return Err(ParseError {
+                                message: format!("Expected closing bracket ']', but found {}.", rb_mt.token.to_string_representation()),
+                                line: rb_mt.line,
+                                column: rb_mt.column,
+                                length: rb_mt.length,
+                                suggestion: "Close the index access, e.g., 'list[index]'.".to_string(),
+                            });
+                        }
+                        is_index = true;
+                        index_expr = Some(idx);
+                    }
+                }
 
                 let to_mt = self.peek().cloned().ok_or_else(|| ParseError {
                     message: format!("Expected 'to' or 'auf' after variable name '{}'.", name),
@@ -261,12 +307,22 @@ impl<'a> Parser<'a> {
                 let value = self.parse_expr()?;
                 self.expect_statement_end(&format!("variable assignment '{}'", name))?;
 
-                Ok(Stmt::Assign {
-                    name,
-                    value,
-                    name_line: name_mt.line,
-                    name_col: name_mt.column,
-                })
+                if is_index {
+                    Ok(Stmt::IndexAssign {
+                        list: name,
+                        index: index_expr.unwrap(),
+                        value,
+                        name_line: name_mt.line,
+                        name_col: name_mt.column,
+                    })
+                } else {
+                    Ok(Stmt::Assign {
+                        name,
+                        value,
+                        name_line: name_mt.line,
+                        name_col: name_mt.column,
+                    })
+                }
             }
             Token::Print => {
                 self.advance(); // consume 'print' / 'show' / 'zeige'
@@ -567,6 +623,145 @@ impl<'a> Parser<'a> {
                 self.expect_statement_end("append call")?;
                 Ok(Stmt::Append { list, item })
             }
+            Token::WriteFile => {
+                let write_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'write_file' / 'schreibe_datei'.".to_string(),
+                    line: write_tok.line,
+                    column: write_tok.column + write_tok.length,
+                    length: 1,
+                    suggestion: "Pass parameters inside parentheses, e.g., 'write_file(\"file.txt\", \"data\")'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'write_file' / 'schreibe_datei', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'write_file(filename, content)'.".to_string(),
+                    });
+                }
+
+                let filename = self.parse_expr()?;
+
+                let comma_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected ',' separating filename and content in write_file call.".to_string(),
+                    line: write_tok.line,
+                    column: write_tok.column + write_tok.length + 2,
+                    length: 1,
+                    suggestion: "Add a comma between arguments, e.g., 'write_file(\"file.txt\", \"data\")'.".to_string(),
+                })?;
+                if comma_mt.token == Token::Comma {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected ',' separating filename and content in write_file call, but found {}.", comma_mt.token.to_string_representation()),
+                        line: comma_mt.line,
+                        column: comma_mt.column,
+                        length: comma_mt.length,
+                        suggestion: "Separate arguments with a comma, e.g., 'write_file(filename, content)'.".to_string(),
+                    });
+                }
+
+                let content = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' at the end of write_file call.".to_string(),
+                    line: write_tok.line,
+                    column: write_tok.column + write_tok.length + 3,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'write_file(filename, content)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' at the end of write_file call, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'write_file(filename, content)'.".to_string(),
+                    });
+                }
+
+                self.expect_statement_end("write_file call")?;
+                Ok(Stmt::WriteFile { filename, content })
+            }
+            Token::Try => {
+                let try_tok = self.advance().unwrap().clone();
+                self.expect_statement_end("try statement")?;
+                
+                let mut try_block = Vec::new();
+                let mut catch_block = Vec::new();
+                
+                while let Some(mt) = self.peek() {
+                    if mt.token == Token::Catch || mt.token == Token::End {
+                        break;
+                    }
+                    if mt.token == Token::Newline {
+                        self.advance();
+                        continue;
+                    }
+                    try_block.push(self.parse_statement()?);
+                }
+                
+                let next_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected 'catch' / 'fange' block after 'try' / 'versuche' block, but hit end of file.".to_string(),
+                    line: try_tok.line,
+                    column: try_tok.column,
+                    length: try_tok.length,
+                    suggestion: "Add a catch block, e.g., 'catch' followed by error handling code and 'end'.".to_string(),
+                })?;
+                
+                if next_mt.token == Token::Catch {
+                    self.advance(); // consume 'catch'
+                    self.expect_statement_end("catch block")?;
+                    
+                    while let Some(mt) = self.peek() {
+                        if mt.token == Token::End {
+                            break;
+                        }
+                        if mt.token == Token::Newline {
+                            self.advance();
+                            continue;
+                        }
+                        catch_block.push(self.parse_statement()?);
+                    }
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected 'catch' / 'fange' keyword after try block, but found {}.", next_mt.token.to_string_representation()),
+                        line: next_mt.line,
+                        column: next_mt.column,
+                        length: next_mt.length,
+                        suggestion: "Add a catch block, e.g., 'catch ... end'.".to_string(),
+                    });
+                }
+                
+                let end_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected 'end' / 'ende' at the end of try-catch block.".to_string(),
+                    line: try_tok.line,
+                    column: try_tok.column,
+                    length: 1,
+                    suggestion: "Add 'end' (or 'ende') to close the try-catch block.".to_string(),
+                })?;
+                
+                if end_mt.token == Token::End {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected 'end' / 'ende' to close try-catch block, but found {}.", end_mt.token.to_string_representation()),
+                        line: end_mt.line,
+                        column: end_mt.column,
+                        length: end_mt.length,
+                        suggestion: "Add 'end' (or 'ende') to close the try-catch block.".to_string(),
+                    });
+                }
+                
+                self.expect_statement_end("try-catch block")?;
+                Ok(Stmt::TryCatch { try_block, catch_block })
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect_statement_end("expression statement")?;
@@ -654,6 +849,116 @@ impl<'a> Parser<'a> {
         })?;
 
         match &mt.token {
+            Token::LBrace => {
+                let lb_tok = self.advance().unwrap().clone();
+                let mut entries = Vec::new();
+                while let Some(el_mt) = self.peek() {
+                    if el_mt.token == Token::RBrace {
+                        break;
+                    }
+                    let key_expr = self.parse_expr()?;
+                    
+                    let col_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                        message: "Expected ':' after dictionary key expression.".to_string(),
+                        line: lb_tok.line,
+                        column: lb_tok.column,
+                        length: 1,
+                        suggestion: "Separate keys and values with a colon, e.g., '{\"key\": value}'.".to_string(),
+                    })?;
+                    if col_mt.token == Token::Colon {
+                        self.advance();
+                    } else {
+                        return Err(ParseError {
+                            message: format!("Expected ':' after dictionary key expression, but found {}.", col_mt.token.to_string_representation()),
+                            line: col_mt.line,
+                            column: col_mt.column,
+                            length: col_mt.length,
+                            suggestion: "Use a colon, e.g., '{\"key\": value}'.".to_string(),
+                        });
+                    }
+                    
+                    let val_expr = self.parse_expr()?;
+                    entries.push((key_expr, val_expr));
+                    
+                    if let Some(next_mt) = self.peek() {
+                        if next_mt.token == Token::Comma {
+                            self.advance();
+                        } else if next_mt.token != Token::RBrace {
+                            return Err(ParseError {
+                                message: format!("Expected ',' or '}}' in dictionary literal, but found {}.", next_mt.token.to_string_representation()),
+                                line: next_mt.line,
+                                column: next_mt.column,
+                                length: next_mt.length,
+                                suggestion: "Separate dictionary elements with commas, e.g., '{\"key1\": 1, \"key2\": 2}'.".to_string(),
+                            });
+                        }
+                    }
+                }
+                
+                let rb_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing brace '}' at the end of dictionary literal.".to_string(),
+                    line: lb_tok.line,
+                    column: lb_tok.column,
+                    length: 1,
+                    suggestion: "Add a closing brace '}'.".to_string(),
+                })?;
+                if rb_mt.token == Token::RBrace {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing brace '}}' at the end of dictionary literal, but found {}.", rb_mt.token.to_string_representation()),
+                        line: rb_mt.line,
+                        column: rb_mt.column,
+                        length: rb_mt.length,
+                        suggestion: "Add a closing brace '}'.".to_string(),
+                    });
+                }
+                Ok(Expr::DictLiteral(entries))
+            }
+            Token::ReadFile => {
+                let read_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'read_file' / 'lese_datei'.".to_string(),
+                    line: read_tok.line,
+                    column: read_tok.column + read_tok.length,
+                    length: 1,
+                    suggestion: "Pass the filename parameter inside parentheses, e.g., 'read_file(\"file.txt\")'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'read_file' / 'lese_datei', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'read_file(filename)'.".to_string(),
+                    });
+                }
+
+                let filename = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' at the end of read_file call.".to_string(),
+                    line: read_tok.line,
+                    column: read_tok.column + read_tok.length + 2,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'read_file(filename)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' at the end of read_file call, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'read_file(filename)'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::ReadFile(Box::new(filename)))
+            }
             Token::LBracket => {
                 let lb_tok = self.advance().unwrap().clone();
                 let mut elements = Vec::new();

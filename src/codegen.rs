@@ -6,6 +6,7 @@ pub enum Type {
     Int,
     Str,
     List(Box<Type>),
+    Dict(HashMap<String, Type>),
 }
 
 #[allow(dead_code)]
@@ -67,6 +68,7 @@ fn pre_populate_locals(stmt: &Stmt, local_symbols: &mut HashMap<String, Variable
             let val_type = infer_expr_type_simple(value, local_symbols);
             local_symbols.insert(name.clone(), VariableInfo { var_type: val_type, storage: Storage::Local(0) });
         }
+        Stmt::IndexAssign { .. } => {}
         Stmt::If { then_branch, .. } => {
             for s in then_branch {
                 pre_populate_locals(s, local_symbols);
@@ -74,6 +76,14 @@ fn pre_populate_locals(stmt: &Stmt, local_symbols: &mut HashMap<String, Variable
         }
         Stmt::While { body, .. } => {
             for s in body {
+                pre_populate_locals(s, local_symbols);
+            }
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                pre_populate_locals(s, local_symbols);
+            }
+            for s in catch_block {
                 pre_populate_locals(s, local_symbols);
             }
         }
@@ -93,13 +103,31 @@ fn infer_expr_type_simple(expr: &Expr, local_symbols: &HashMap<String, VariableI
                 Type::List(Box::new(infer_expr_type_simple(&elements[0], local_symbols)))
             }
         }
-        Expr::ListIndex { list, .. } => {
+        Expr::DictLiteral(entries) => {
+            let mut map = HashMap::new();
+            for entry in entries {
+                if let Expr::Str(k) = &entry.0 {
+                    let val_t = infer_expr_type_simple(&entry.1, local_symbols);
+                    map.insert(k.clone(), val_t);
+                }
+            }
+            Type::Dict(map)
+        }
+        Expr::ListIndex { list, index } => {
             let l_type = infer_expr_type_simple(list, local_symbols);
             match l_type {
                 Type::List(t) => *t,
+                Type::Dict(map) => {
+                    if let Expr::Str(k) = &**index {
+                        map.get(k).cloned().unwrap_or(Type::Int)
+                    } else {
+                        Type::Int
+                    }
+                }
                 _ => Type::Int,
             }
         }
+        Expr::ReadFile(_) => Type::Str,
         _ => Type::Int,
     }
 }
@@ -132,6 +160,19 @@ fn get_stmt_return_type(stmt: &Stmt, scope_stack: &[HashMap<String, VariableInfo
             }
             None
         }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                if let Some(t) = get_stmt_return_type(s, scope_stack) {
+                    return Some(t);
+                }
+            }
+            for s in catch_block {
+                if let Some(t) = get_stmt_return_type(s, scope_stack) {
+                    return Some(t);
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -148,13 +189,31 @@ fn infer_expr_type_simple_stack(expr: &Expr, scope_stack: &[HashMap<String, Vari
                 Type::List(Box::new(infer_expr_type_simple_stack(&elements[0], scope_stack)))
             }
         }
-        Expr::ListIndex { list, .. } => {
+        Expr::DictLiteral(entries) => {
+            let mut map = HashMap::new();
+            for entry in entries {
+                if let Expr::Str(k) = &entry.0 {
+                    let val_t = infer_expr_type_simple_stack(&entry.1, scope_stack);
+                    map.insert(k.clone(), val_t);
+                }
+            }
+            Type::Dict(map)
+        }
+        Expr::ListIndex { list, index } => {
             let l_type = infer_expr_type_simple_stack(list, scope_stack);
             match l_type {
                 Type::List(t) => *t,
+                Type::Dict(map) => {
+                    if let Expr::Str(k) = &**index {
+                        map.get(k).cloned().unwrap_or(Type::Int)
+                    } else {
+                        Type::Int
+                    }
+                }
                 _ => Type::Int,
             }
         }
+        Expr::ReadFile(_) => Type::Str,
         _ => Type::Int,
     }
 }
@@ -171,7 +230,7 @@ fn resolve_variable(name: &str, scope_stack: &[HashMap<String, VariableInfo>]) -
 fn set_variable(name: &str, var_info: VariableInfo, scope_stack: &mut [HashMap<String, VariableInfo>]) {
     for scope in scope_stack.iter_mut().rev() {
         if scope.contains_key(name) {
-            scope.insert(name.to_string(), var_info);
+            scope.insert(name.to_string(), var_info.clone());
             return;
         }
     }
@@ -206,8 +265,35 @@ fn type_check_stmt(
                     });
                 }
             } else {
-                let storage = if scope_stack.len() > 1 { Storage::Local(0) } else { Storage::Global };
+                let storage = if current_function.is_some() { Storage::Local(0) } else { Storage::Global };
                 set_variable(name, VariableInfo { var_type: val_type, storage }, scope_stack);
+            }
+        }
+        Stmt::IndexAssign { list, index, value, name_line, name_col } => {
+            let list_type_opt = resolve_variable(list, scope_stack).map(|info| info.var_type.clone());
+            match list_type_opt {
+                Some(Type::List(t_type)) => {
+                    type_check_expr(index, scope_stack, function_signatures, Some(Type::Int), *name_line, *name_col)?;
+                    type_check_expr(value, scope_stack, function_signatures, Some(*t_type), *name_line, *name_col)?;
+                }
+                Some(Type::Dict(mut map)) => {
+                    type_check_expr(index, scope_stack, function_signatures, Some(Type::Str), *name_line, *name_col)?;
+                    let val_type = type_check_expr(value, scope_stack, function_signatures, None, *name_line, *name_col)?;
+                    // Update key-value mapping in compile-time dictionary type representation
+                    if let Expr::Str(k) = index {
+                        map.insert(k.clone(), val_type.clone());
+                        let storage = resolve_variable(list, scope_stack).unwrap().storage;
+                        set_variable(list, VariableInfo { var_type: Type::Dict(map), storage }, scope_stack);
+                    }
+                }
+                _ => {
+                    return Err(TypeError {
+                        message: format!("Variable '{}' is not indexable. Cannot assign an index.", list),
+                        line: *name_line,
+                        column: *name_col,
+                        suggestion: "Ensure the variable is a List or a Dictionary before indexing it.".to_string(),
+                    });
+                }
             }
         }
         Stmt::Print(expr) => {
@@ -223,11 +309,9 @@ fn type_check_stmt(
                     suggestion: "Ensure the condition is a comparison or an integer value.".to_string(),
                 });
             }
-            scope_stack.push(HashMap::new()); // Nested scope
             for s in then_branch {
                 type_check_stmt(s, scope_stack, function_signatures, current_function)?;
             }
-            scope_stack.pop();
         }
         Stmt::While { cond, body } => {
             let cond_type = type_check_expr(cond, scope_stack, function_signatures, Some(Type::Int), 1, 1)?;
@@ -239,11 +323,9 @@ fn type_check_stmt(
                     suggestion: "Ensure the condition is a comparison or an integer value.".to_string(),
                 });
             }
-            scope_stack.push(HashMap::new()); // Nested scope
             for s in body {
                 type_check_stmt(s, scope_stack, function_signatures, current_function)?;
             }
-            scope_stack.pop();
         }
         Stmt::FnDef { name, params, body } => {
             let (_, ret_type) = function_signatures.get(name).unwrap();
@@ -255,7 +337,6 @@ fn type_check_stmt(
                 pre_populate_locals(s, &mut local_symbols);
             }
             
-            // Push local scope
             scope_stack.push(local_symbols);
             for s in body {
                 type_check_stmt(s, scope_stack, function_signatures, Some(&(name.clone(), ret_type.clone())))?;
@@ -310,6 +391,19 @@ fn type_check_stmt(
                     column: 1,
                     suggestion: "Make sure the appended item type matches the list elements type.".to_string(),
                 });
+            }
+        }
+        Stmt::WriteFile { filename, content } => {
+            type_check_expr(filename, scope_stack, function_signatures, Some(Type::Str), 1, 1)?;
+            type_check_expr(content, scope_stack, function_signatures, Some(Type::Str), 1, 1)?;
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                type_check_stmt(s, scope_stack, function_signatures, current_function)?;
+            }
+            
+            for s in catch_block {
+                type_check_stmt(s, scope_stack, function_signatures, current_function)?;
             }
         }
         Stmt::Expr(expr) => {
@@ -449,26 +543,76 @@ fn type_check_expr(
                 Ok(Type::List(Box::new(first_type)))
             }
         }
+        Expr::DictLiteral(entries) => {
+            let mut map = HashMap::new();
+            for entry in entries {
+                let k_type = type_check_expr(&entry.0, scope_stack, function_signatures, Some(Type::Str), line, column)?;
+                if k_type != Type::Str {
+                    return Err(TypeError {
+                        message: "Dictionary keys must be strings.".to_string(),
+                        line,
+                        column,
+                        suggestion: "Ensure all keys in the dictionary literal evaluate to string values.".to_string(),
+                    });
+                }
+                
+                if let Expr::Str(k_name) = &entry.0 {
+                    let val_type = type_check_expr(&entry.1, scope_stack, function_signatures, None, line, column)?;
+                    map.insert(k_name.clone(), val_type);
+                }
+            }
+            Ok(Type::Dict(map))
+        }
         Expr::ListIndex { list, index } => {
             let list_type = type_check_expr(list, scope_stack, function_signatures, None, line, column)?;
-            let index_type = type_check_expr(index, scope_stack, function_signatures, Some(Type::Int), line, column)?;
-            if index_type != Type::Int {
-                return Err(TypeError {
-                    message: format!("Array index must be a number, but found {:?}.", index_type),
-                    line,
-                    column,
-                    suggestion: "Pass an integer literal or variable to index the list.".to_string(),
-                });
-            }
             match list_type {
-                Type::List(t) => Ok(*t),
+                Type::List(t) => {
+                    let idx_type = type_check_expr(index, scope_stack, function_signatures, Some(Type::Int), line, column)?;
+                    if idx_type != Type::Int {
+                        return Err(TypeError {
+                            message: "Array index must be a number.".to_string(),
+                            line,
+                            column,
+                            suggestion: "Use an integer index for list lookups.".to_string(),
+                        });
+                    }
+                    Ok(*t)
+                }
+                Type::Dict(map) => {
+                    let idx_type = type_check_expr(index, scope_stack, function_signatures, Some(Type::Str), line, column)?;
+                    if idx_type != Type::Str {
+                        return Err(TypeError {
+                            message: "Dictionary key must be a string.".to_string(),
+                            line,
+                            column,
+                            suggestion: "Use a string key for dictionary lookups.".to_string(),
+                        });
+                    }
+                    if let Expr::Str(k_name) = &**index {
+                        Ok(map.get(k_name).cloned().unwrap_or(Type::Int))
+                    } else {
+                        Ok(Type::Int)
+                    }
+                }
                 _ => Err(TypeError {
-                    message: "Cannot index a non-list variable.".to_string(),
+                    message: "Cannot index a non-list/non-dict variable.".to_string(),
                     line,
                     column,
-                    suggestion: "Verify that the variable being indexed is a list.".to_string(),
+                    suggestion: "Verify that the variable being indexed is a list or a dictionary.".to_string(),
                 }),
             }
+        }
+        Expr::ReadFile(sub) => {
+            let sub_type = type_check_expr(sub, scope_stack, function_signatures, Some(Type::Str), line, column)?;
+            if sub_type != Type::Str {
+                return Err(TypeError {
+                    message: "The 'read_file' function requires a string filename.".to_string(),
+                    line,
+                    column,
+                    suggestion: "Ensure the parameter evaluates to a string.".to_string(),
+                });
+            }
+            Ok(Type::Str)
         }
         Expr::Binary { op, left, right } => {
             let left_expected = match op {
@@ -536,6 +680,10 @@ fn collect_string_literals(program: &Program) -> Vec<String> {
 fn collect_stmt_strings(stmt: &Stmt, literals: &mut Vec<String>) {
     match stmt {
         Stmt::Assign { value, .. } => collect_expr_strings(value, literals),
+        Stmt::IndexAssign { index, value, .. } => {
+            collect_expr_strings(index, literals);
+            collect_expr_strings(value, literals);
+        }
         Stmt::Print(expr) => collect_expr_strings(expr, literals),
         Stmt::If { cond, then_branch } => {
             collect_expr_strings(cond, literals);
@@ -562,6 +710,18 @@ fn collect_stmt_strings(stmt: &Stmt, literals: &mut Vec<String>) {
         Stmt::Append { list, item } => {
             collect_expr_strings(list, literals);
             collect_expr_strings(item, literals);
+        }
+        Stmt::WriteFile { filename, content } => {
+            collect_expr_strings(filename, literals);
+            collect_expr_strings(content, literals);
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                collect_stmt_strings(s, literals);
+            }
+            for s in catch_block {
+                collect_stmt_strings(s, literals);
+            }
         }
         Stmt::Expr(expr) => collect_expr_strings(expr, literals),
     }
@@ -595,10 +755,17 @@ fn collect_expr_strings(expr: &Expr, literals: &mut Vec<String>) {
                 collect_expr_strings(el, literals);
             }
         }
+        Expr::DictLiteral(entries) => {
+            for entry in entries {
+                collect_expr_strings(&entry.0, literals);
+                collect_expr_strings(&entry.1, literals);
+            }
+        }
         Expr::ListIndex { list, index } => {
             collect_expr_strings(list, literals);
             collect_expr_strings(index, literals);
         }
+        Expr::ReadFile(sub) => collect_expr_strings(sub, literals),
         Expr::Binary { left, right, .. } => {
             collect_expr_strings(left, literals);
             collect_expr_strings(right, literals);
@@ -627,6 +794,9 @@ fn collect_stmt_inputs(stmt: &Stmt, symbol_table: &HashMap<String, VariableInfo>
                 collect_expr_inputs(value, ids);
             }
         }
+        Stmt::IndexAssign { value, .. } => {
+            collect_expr_inputs(value, ids);
+        }
         Stmt::Print(expr) => collect_expr_inputs(expr, ids),
         Stmt::If { cond, then_branch } => {
             collect_expr_inputs(cond, ids);
@@ -653,6 +823,18 @@ fn collect_stmt_inputs(stmt: &Stmt, symbol_table: &HashMap<String, VariableInfo>
         Stmt::Append { list, item } => {
             collect_expr_inputs(list, ids);
             collect_expr_inputs(item, ids);
+        }
+        Stmt::WriteFile { filename, content } => {
+            collect_expr_inputs(filename, ids);
+            collect_expr_inputs(content, ids);
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                collect_stmt_inputs(s, symbol_table, ids);
+            }
+            for s in catch_block {
+                collect_stmt_inputs(s, symbol_table, ids);
+            }
         }
         Stmt::Expr(expr) => collect_expr_inputs(expr, ids),
     }
@@ -686,10 +868,17 @@ fn collect_expr_inputs(expr: &Expr, ids: &mut Vec<usize>) {
                 collect_expr_inputs(el, ids);
             }
         }
+        Expr::DictLiteral(entries) => {
+            for entry in entries {
+                collect_expr_inputs(&entry.0, ids);
+                collect_expr_inputs(&entry.1, ids);
+            }
+        }
         Expr::ListIndex { list, index } => {
             collect_expr_inputs(list, ids);
             collect_expr_inputs(index, ids);
         }
+        Expr::ReadFile(sub) => collect_expr_inputs(sub, ids),
         Expr::Binary { left, right, .. } => {
             collect_expr_inputs(left, ids);
             collect_expr_inputs(right, ids);
@@ -710,6 +899,7 @@ fn has_gui_calls(program: &Program) -> bool {
 fn stmt_has_gui(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Assign { value, .. } => expr_has_gui(value),
+        Stmt::IndexAssign { value, .. } => expr_has_gui(value),
         Stmt::Print(expr) => expr_has_gui(expr),
         Stmt::If { cond, then_branch } => {
             if expr_has_gui(cond) {
@@ -751,6 +941,22 @@ fn stmt_has_gui(stmt: &Stmt) -> bool {
         Stmt::Append { list, item } => {
             expr_has_gui(list) || expr_has_gui(item)
         }
+        Stmt::WriteFile { filename, content } => {
+            expr_has_gui(filename) || expr_has_gui(content)
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                if stmt_has_gui(s) {
+                    return true;
+                }
+            }
+            for s in catch_block {
+                if stmt_has_gui(s) {
+                    return true;
+                }
+            }
+            false
+        }
         Stmt::Expr(expr) => expr_has_gui(expr),
     }
 }
@@ -776,9 +982,18 @@ fn expr_has_gui(expr: &Expr) -> bool {
             }
             false
         }
+        Expr::DictLiteral(entries) => {
+            for entry in entries {
+                if expr_has_gui(&entry.0) || expr_has_gui(&entry.1) {
+                    return true;
+                }
+            }
+            false
+        }
         Expr::ListIndex { list, index } => {
             expr_has_gui(list) || expr_has_gui(index)
         }
+        Expr::ReadFile(sub) => expr_has_gui(sub),
         Expr::Binary { left, right, .. } => expr_has_gui(left) || expr_has_gui(right),
         _ => false,
     }
@@ -818,13 +1033,31 @@ fn get_expr_type(
                 Type::List(Box::new(get_expr_type(&elements[0], symbol_table, function_signatures, expected_type)))
             }
         }
-        Expr::ListIndex { list, .. } => {
+        Expr::DictLiteral(entries) => {
+            let mut map = HashMap::new();
+            for entry in entries {
+                if let Expr::Str(k_name) = &entry.0 {
+                    let val_type = get_expr_type(&entry.1, symbol_table, function_signatures, expected_type.clone());
+                    map.insert(k_name.clone(), val_type);
+                }
+            }
+            Type::Dict(map)
+        }
+        Expr::ListIndex { list, index } => {
             let l_type = get_expr_type(list, symbol_table, function_signatures, expected_type);
             match l_type {
                 Type::List(t) => *t,
+                Type::Dict(map) => {
+                    if let Expr::Str(k_name) = &**index {
+                        map.get(k_name).cloned().unwrap_or(Type::Int)
+                    } else {
+                        Type::Int
+                    }
+                }
                 _ => Type::Int,
             }
         }
+        Expr::ReadFile(_) => Type::Str,
         Expr::Binary { op, .. } => {
             match op {
                 Op::Add | Op::Sub | Op::Mul | Op::Div => Type::Int,
@@ -849,6 +1082,7 @@ fn collect_stmt_locals(stmt: &Stmt, params: &[String], locals: &mut Vec<String>)
                 locals.push(name.clone());
             }
         }
+        Stmt::IndexAssign { .. } => {}
         Stmt::If { then_branch, .. } => {
             for s in then_branch {
                 collect_stmt_locals(s, params, locals);
@@ -859,6 +1093,14 @@ fn collect_stmt_locals(stmt: &Stmt, params: &[String], locals: &mut Vec<String>)
                 collect_stmt_locals(s, params, locals);
             }
         }
+        Stmt::TryCatch { try_block, catch_block } => {
+            for s in try_block {
+                collect_stmt_locals(s, params, locals);
+            }
+            for s in catch_block {
+                collect_stmt_locals(s, params, locals);
+            }
+        }
         _ => {}
     }
 }
@@ -866,7 +1108,7 @@ fn collect_stmt_locals(stmt: &Stmt, params: &[String], locals: &mut Vec<String>)
 pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, VariableInfo>) -> String {
     let mut asm = String::new();
     let has_gui = has_gui_calls(program);
-    let stack_res = if has_gui { 104 } else { 40 };
+    let stack_res = if has_gui { 96 } else { 32 };
     
     // Construct function signatures
     let mut function_signatures = HashMap::new();
@@ -907,6 +1149,15 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     asm.push_str("  fmt_int_in db '%lld', 0\n");
     asm.push_str("  fmt_str_in db '%s', 0\n");
     asm.push_str("  bounds_err_msg db 'Error: Array index out of bounds.', 13, 10, 0\n");
+    asm.push_str("  dict_err_msg db 'Error: Dictionary key not found.', 13, 10, 0\n");
+    asm.push_str("  file_err_msg db 'Error: Could not open file.', 13, 10, 0\n");
+    asm.push_str("  file_mode_w db 'w', 0\n");
+    asm.push_str("  file_mode_rb db 'rb', 0\n");
+    asm.push_str("  bro_error_code dq 0\n");
+    asm.push_str("  bro_exception_handler dq 0\n");
+    asm.push_str("  exception_depth dq 0\n");
+    asm.push_str("  saved_rsps dq 32 dup 0\n");
+    asm.push_str("  saved_handlers dq 32 dup 0\n");
     
     for (lit, idx) in &string_map {
         let escaped = escape_fasm_string(lit);
@@ -945,6 +1196,9 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     // Section .text
     asm.push_str("section '.text' code readable executable\n");
     asm.push_str("start:\n");
+    asm.push_str("  push rbp\n");
+    asm.push_str("  mov rbp, rsp\n");
+    asm.push_str("  and rsp, -16\n"); // Align stack to 16-byte boundary
     asm.push_str(&format!("  sub rsp, {}\n\n", stack_res));
     
     if has_gui {
@@ -958,7 +1212,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     
     for stmt in &program.statements {
         if let Stmt::FnDef { name, params, body } = stmt {
-            // Compile function definition
             let locals = collect_local_vars(body, params);
             let local_bytes = 8 * locals.len();
             let total_needed = 32 + local_bytes;
@@ -968,7 +1221,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
                 total_needed + 8
             };
             
-            // Map offsets relative to RBP
             let mut local_offsets = HashMap::new();
             for (i, p) in params.iter().enumerate() {
                 local_offsets.insert(p.clone(), 16 + 8 * (i as i32));
@@ -985,9 +1237,9 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
             functions_asm.push_str(&format!("fn_{}:\n", name));
             functions_asm.push_str("  push rbp\n");
             functions_asm.push_str("  mov rbp, rsp\n");
+            functions_asm.push_str("  and rsp, -16\n"); // Align stack in function as well
             functions_asm.push_str(&format!("  sub rsp, {}\n", reservation_size));
             
-            // Save parameters to shadow space
             if params.len() >= 1 {
                 functions_asm.push_str("  mov [rbp + 16], rcx\n");
             }
@@ -1001,12 +1253,10 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
                 functions_asm.push_str("  mov [rbp + 40], r9\n");
             }
             
-            // Generate code for statements inside the function body
             for s in body {
                 codegen_stmt_with_ctx(s, &mut functions_asm, &string_map, symbol_table, &function_signatures, &mut label_counter, Some(&ctx));
             }
             
-            // Epilogue
             functions_asm.push_str(&format!(".L_epilogue_{}:\n", name));
             functions_asm.push_str("  mov rsp, rbp\n");
             functions_asm.push_str("  pop rbp\n");
@@ -1021,18 +1271,153 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     
     // Bounds check error handler
     asm.push_str(".L_bounds_error:\n");
-    asm.push_str("  sub rsp, 40\n");
+    asm.push_str("  mov rcx, [bro_exception_handler]\n");
+    asm.push_str("  test rcx, rcx\n");
+    asm.push_str("  jz .L_bounds_error_crash\n");
+    asm.push_str("  mov qword [bro_error_code], 1\n");
+    asm.push_str("  jmp rcx\n");
+    asm.push_str(".L_bounds_error_crash:\n");
     asm.push_str("  mov rdx, bounds_err_msg\n");
     asm.push_str("  mov rcx, fmt_str\n");
     asm.push_str("  call [printf]\n");
     asm.push_str("  mov rcx, 1\n");
     asm.push_str("  call [ExitProcess]\n\n");
     
-    // Append compiled functions to the text section
+    // File I/O error handler
+    asm.push_str(".L_file_error:\n");
+    asm.push_str("  mov rcx, [bro_exception_handler]\n");
+    asm.push_str("  test rcx, rcx\n");
+    asm.push_str("  jz .L_file_error_crash\n");
+    asm.push_str("  mov qword [bro_error_code], 1\n");
+    asm.push_str("  jmp rcx\n");
+    asm.push_str(".L_file_error_crash:\n");
+    asm.push_str("  mov rdx, file_err_msg\n");
+    asm.push_str("  mov rcx, fmt_str\n");
+    asm.push_str("  call [printf]\n");
+    asm.push_str("  mov rcx, 1\n");
+    asm.push_str("  call [ExitProcess]\n\n");
+    
+    // Dictionary Subroutines
+    asm.push_str(".L_fnv1a_hash:\n");
+    asm.push_str("  mov rax, 0xcbf29ce484222325\n");
+    asm.push_str("  mov rsi, rcx\n");
+    asm.push_str(".L_hash_loop:\n");
+    asm.push_str("  movzx rdi, byte [rsi]\n");
+    asm.push_str("  test rdi, rdi\n");
+    asm.push_str("  jz .L_hash_done\n");
+    asm.push_str("  xor rax, rdi\n");
+    asm.push_str("  mov rdx, 0x100000001b3\n");
+    asm.push_str("  imul rax, rdx\n");
+    asm.push_str("  inc rsi\n");
+    asm.push_str("  jmp .L_hash_loop\n");
+    asm.push_str(".L_hash_done:\n");
+    asm.push_str("  ret\n\n");
+    
+    asm.push_str(".L_dict_insert:\n");
+    asm.push_str("  push rbp\n");
+    asm.push_str("  mov rbp, rsp\n");
+    asm.push_str("  and rsp, -16\n");
+    asm.push_str("  sub rsp, 48\n");
+    asm.push_str("  mov [rbp - 8], rcx\n"); // dict_ptr
+    asm.push_str("  mov [rbp - 16], rdx\n"); // key_str
+    asm.push_str("  mov [rbp - 24], r8\n"); // value
+    
+    asm.push_str("  mov rcx, rdx\n");
+    asm.push_str("  call .L_fnv1a_hash\n");
+    asm.push_str("  and rax, 15\n");
+    asm.push_str("  mov [rbp - 32], rax\n"); // bucket index
+    
+    asm.push_str("  mov rcx, [rbp - 8]\n");
+    asm.push_str("  mov rax, [rbp - 32]\n");
+    asm.push_str("  mov r12, [rcx + 8 * rax]\n"); // entry_ptr
+    asm.push_str(".L_dict_insert_loop:\n");
+    asm.push_str("  test r12, r12\n");
+    asm.push_str("  jz .L_dict_insert_new\n");
+    asm.push_str("  mov rdx, [rbp - 16]\n");
+    asm.push_str("  mov rcx, [r12 + 0]\n");
+    asm.push_str("  call [strcmp]\n");
+    asm.push_str("  test rax, rax\n");
+    asm.push_str("  jz .L_dict_insert_update\n");
+    asm.push_str("  mov r12, [r12 + 16]\n");
+    asm.push_str("  jmp .L_dict_insert_loop\n");
+    
+    asm.push_str(".L_dict_insert_update:\n");
+    asm.push_str("  mov rax, [rbp - 24]\n");
+    asm.push_str("  mov [r12 + 8], rax\n");
+    asm.push_str("  jmp .L_dict_insert_done\n");
+    
+    asm.push_str(".L_dict_insert_new:\n");
+    asm.push_str("  mov rcx, 24\n");
+    asm.push_str("  call [malloc]\n");
+    asm.push_str("  mov rdx, [rbp - 16]\n");
+    asm.push_str("  mov [rax + 0], rdx\n");
+    asm.push_str("  mov r8, [rbp - 24]\n");
+    asm.push_str("  mov [rax + 8], r8\n");
+    asm.push_str("  mov rcx, [rbp - 8]\n");
+    asm.push_str("  mov rdx, [rbp - 32]\n");
+    asm.push_str("  mov r9, [rcx + 8 * rdx]\n");
+    asm.push_str("  mov [rax + 16], r9\n");
+    asm.push_str("  mov [rcx + 8 * rdx], rax\n");
+    
+    asm.push_str(".L_dict_insert_done:\n");
+    asm.push_str("  mov rsp, rbp\n");
+    asm.push_str("  pop rbp\n");
+    asm.push_str("  ret\n\n");
+    
+    asm.push_str(".L_dict_lookup:\n");
+    asm.push_str("  push rbp\n");
+    asm.push_str("  mov rbp, rsp\n");
+    asm.push_str("  and rsp, -16\n");
+    asm.push_str("  sub rsp, 48\n");
+    asm.push_str("  mov [rbp - 8], rcx\n");
+    asm.push_str("  mov [rbp - 16], rdx\n");
+    
+    asm.push_str("  test rcx, rcx\n");
+    asm.push_str("  jz .L_dict_lookup_error\n");
+    
+    asm.push_str("  mov rcx, rdx\n");
+    asm.push_str("  call .L_fnv1a_hash\n");
+    asm.push_str("  and rax, 15\n");
+    
+    asm.push_str("  mov rcx, [rbp - 8]\n");
+    asm.push_str("  mov r12, [rcx + 8 * rax]\n");
+    asm.push_str(".L_dict_lookup_loop:\n");
+    asm.push_str("  test r12, r12\n");
+    asm.push_str("  jz .L_dict_lookup_error\n");
+    asm.push_str("  mov rdx, [rbp - 16]\n");
+    asm.push_str("  mov rcx, [r12 + 0]\n");
+    asm.push_str("  call [strcmp]\n");
+    asm.push_str("  test rax, rax\n");
+    asm.push_str("  jz .L_dict_lookup_found\n");
+    asm.push_str("  mov r12, [r12 + 16]\n");
+    asm.push_str("  jmp .L_dict_lookup_loop\n");
+    
+    asm.push_str(".L_dict_lookup_found:\n");
+    asm.push_str("  mov rax, [r12 + 8]\n");
+    asm.push_str("  jmp .L_dict_lookup_done\n");
+    
+    asm.push_str(".L_dict_lookup_error:\n");
+    asm.push_str("  mov rcx, [bro_exception_handler]\n");
+    asm.push_str("  test rcx, rcx\n");
+    asm.push_str("  jz .L_dict_lookup_crash\n");
+    asm.push_str("  mov qword [bro_error_code], 1\n");
+    asm.push_str("  jmp rcx\n");
+    asm.push_str(".L_dict_lookup_crash:\n");
+    asm.push_str("  mov rdx, dict_err_msg\n");
+    asm.push_str("  mov rcx, fmt_str\n");
+    asm.push_str("  call [printf]\n");
+    asm.push_str("  mov rcx, 1\n");
+    asm.push_str("  call [ExitProcess]\n");
+    
+    asm.push_str(".L_dict_lookup_done:\n");
+    asm.push_str("  mov rsp, rbp\n");
+    asm.push_str("  pop rbp\n");
+    asm.push_str("  ret\n\n");
+    
+    // Compile functions
     asm.push_str(&functions_asm);
     
     if has_gui {
-        // Window Procedure inside .text
         asm.push_str("window_proc:\n");
         asm.push_str("  cmp rdx, 2 ; WM_DESTROY\n");
         asm.push_str("  je .L_destroy_wnd\n");
@@ -1045,10 +1430,8 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
         asm.push_str("  call [ExitProcess]\n\n");
     }
     
-    // Section .idata
+    // Import Directory
     asm.push_str("section '.idata' import data readable\n\n");
-    
-    // Directory list
     asm.push_str("  dd rva kernel32_lookup, 0, 0, rva kernel32_name, rva kernel32_address\n");
     asm.push_str("  dd rva msvcrt_lookup, 0, 0, rva msvcrt_name, rva msvcrt_address\n");
     if has_gui {
@@ -1056,7 +1439,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     }
     asm.push_str("  dd 0, 0, 0, 0, 0\n\n");
     
-    // KERNEL32
     asm.push_str("  kernel32_lookup:\n");
     asm.push_str("    dq rva kernel32_ExitProcess\n");
     asm.push_str("    dq rva kernel32_Sleep\n");
@@ -1066,7 +1448,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     asm.push_str("    Sleep       dq rva kernel32_Sleep\n");
     asm.push_str("    dq 0\n\n");
     
-    // MSVCRT
     asm.push_str("  msvcrt_lookup:\n");
     asm.push_str("    dq rva msvcrt_printf\n");
     asm.push_str("    dq rva msvcrt_scanf\n");
@@ -1074,6 +1455,13 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     asm.push_str("    dq rva msvcrt_rand\n");
     asm.push_str("    dq rva msvcrt_malloc\n");
     asm.push_str("    dq rva msvcrt_realloc\n");
+    asm.push_str("    dq rva msvcrt_strcmp\n");
+    asm.push_str("    dq rva msvcrt_fopen\n");
+    asm.push_str("    dq rva msvcrt_fread\n");
+    asm.push_str("    dq rva msvcrt_fwrite\n");
+    asm.push_str("    dq rva msvcrt_fclose\n");
+    asm.push_str("    dq rva msvcrt_fseek\n");
+    asm.push_str("    dq rva msvcrt_ftell\n");
     asm.push_str("    dq 0\n\n");
     asm.push_str("  msvcrt_address:\n");
     asm.push_str("    printf      dq rva msvcrt_printf\n");
@@ -1082,9 +1470,15 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     asm.push_str("    rand        dq rva msvcrt_rand\n");
     asm.push_str("    malloc      dq rva msvcrt_malloc\n");
     asm.push_str("    realloc     dq rva msvcrt_realloc\n");
+    asm.push_str("    strcmp      dq rva msvcrt_strcmp\n");
+    asm.push_str("    fopen       dq rva msvcrt_fopen\n");
+    asm.push_str("    fread       dq rva msvcrt_fread\n");
+    asm.push_str("    fwrite      dq rva msvcrt_fwrite\n");
+    asm.push_str("    fclose      dq rva msvcrt_fclose\n");
+    asm.push_str("    fseek       dq rva msvcrt_fseek\n");
+    asm.push_str("    ftell       dq rva msvcrt_ftell\n");
     asm.push_str("    dq 0\n\n");
     
-    // USER32 (conditional)
     if has_gui {
         asm.push_str("  user32_lookup:\n");
         asm.push_str("    dq rva user32_MessageBoxA\n");
@@ -1106,7 +1500,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
         asm.push_str("    dq 0\n\n");
     }
     
-    // DLL Names
     asm.push_str("  kernel32_name db 'KERNEL32.DLL', 0\n");
     asm.push_str("  msvcrt_name   db 'MSVCRT.DLL', 0\n");
     if has_gui {
@@ -1114,7 +1507,6 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     }
     asm.push_str("\n");
     
-    // Hint Tables
     asm.push_str("  kernel32_ExitProcess dw 0\n");
     asm.push_str("                       db 'ExitProcess', 0\n");
     asm.push_str("  kernel32_Sleep       dw 0\n");
@@ -1131,7 +1523,21 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Varia
     asm.push_str("  msvcrt_malloc        dw 0\n");
     asm.push_str("                       db 'malloc', 0\n");
     asm.push_str("  msvcrt_realloc       dw 0\n");
-    asm.push_str("                       db 'realloc', 0\n\n");
+    asm.push_str("                       db 'realloc', 0\n");
+    asm.push_str("  msvcrt_strcmp        dw 0\n");
+    asm.push_str("                       db 'strcmp', 0\n");
+    asm.push_str("  msvcrt_fopen         dw 0\n");
+    asm.push_str("                       db 'fopen', 0\n");
+    asm.push_str("  msvcrt_fread         dw 0\n");
+    asm.push_str("                       db 'fread', 0\n");
+    asm.push_str("  msvcrt_fwrite        dw 0\n");
+    asm.push_str("                       db 'fwrite', 0\n");
+    asm.push_str("  msvcrt_fclose        dw 0\n");
+    asm.push_str("                       db 'fclose', 0\n");
+    asm.push_str("  msvcrt_fseek         dw 0\n");
+    asm.push_str("                       db 'fseek', 0\n");
+    asm.push_str("  msvcrt_ftell         dw 0\n");
+    asm.push_str("                       db 'ftell', 0\n\n");
     
     if has_gui {
         asm.push_str("  user32_MessageBoxA      dw 0\n");
@@ -1218,6 +1624,46 @@ fn codegen_stmt_with_ctx(
                 }
             }
         }
+        Stmt::IndexAssign { list, index, value, .. } => {
+            let list_type = symbol_table.get(list).map(|info| info.var_type.clone()).unwrap_or(Type::List(Box::new(Type::Int)));
+            match list_type {
+                Type::Dict(..) => {
+                    codegen_expr_with_ctx(&Expr::Var(list.clone()), asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(index, asm, string_map, 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(value, asm, string_map, 2, label_counter, ctx, function_signatures, symbol_table);
+                    
+                    asm.push_str("  pop rdx\n");
+                    asm.push_str("  pop rcx\n");
+                    asm.push_str("  mov r8, rax\n");
+                    
+                    asm.push_str("  call .L_dict_insert\n");
+                }
+                _ => {
+                    codegen_expr_with_ctx(&Expr::Var(list.clone()), asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(index, asm, string_map, 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(value, asm, string_map, 2, label_counter, ctx, function_signatures, symbol_table);
+                    
+                    asm.push_str("  pop r10\n");
+                    asm.push_str("  pop r9\n");
+                    
+                    asm.push_str("  cmp r10, 0\n");
+                    asm.push_str("  jl .L_bounds_error\n");
+                    asm.push_str("  mov r11, [r9 + 8]\n");
+                    asm.push_str("  cmp r10, r11\n");
+                    asm.push_str("  jge .L_bounds_error\n");
+                    
+                    asm.push_str("  mov [r9 + 16 + 8 * r10], rax\n");
+                }
+            }
+        }
         Stmt::Print(expr) => {
             codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
             let expr_type = get_expr_type(expr, symbol_table, function_signatures, None);
@@ -1229,8 +1675,7 @@ fn codegen_stmt_with_ctx(
                 Type::Str => {
                     asm.push_str("  mov rcx, fmt_str\n");
                 }
-                Type::List(_) => {
-                    // For lists, we just print the heap pointer as integer for simplicity
+                _ => {
                     asm.push_str("  mov rcx, fmt_int\n");
                 }
             }
@@ -1279,37 +1724,32 @@ fn codegen_stmt_with_ctx(
             asm.push_str("  push rax\n");
             
             codegen_expr_with_ctx(item, asm, string_map, 1, label_counter, ctx, function_signatures, symbol_table);
-            asm.push_str("  pop r12\n"); // r12 = list pointer
-            asm.push_str("  push rax\n"); // save item on stack (depth=1)
+            asm.push_str("  pop r12\n");
+            asm.push_str("  push rax\n");
             
-            asm.push_str("  mov r10, [r12 + 8]\n"); // length
-            asm.push_str("  mov r11, [r12 + 0]\n"); // capacity
+            asm.push_str("  mov r10, [r12 + 8]\n");
+            asm.push_str("  mov r11, [r12 + 0]\n");
             
             asm.push_str("  cmp r10, r11\n");
             asm.push_str(&format!("  jne .L_no_realloc_{}\n", label_idx));
             
-            // Reallocate
-            asm.push_str("  shl r11, 1\n"); // capacity = capacity * 2
+            asm.push_str("  shl r11, 1\n");
             asm.push_str("  mov [r12 + 0], r11\n");
             asm.push_str("  imul r11, 8\n");
-            asm.push_str("  add r11, 16\n"); // new_bytes = capacity * 8 + 16
+            asm.push_str("  add r11, 16\n");
             
-            asm.push_str("  push r12\n"); // save old list pointer (depth=2)
-            asm.push_str("  push r10\n"); // save length (depth=3)
+            asm.push_str("  push r12\n");
+            asm.push_str("  push r10\n");
             
             asm.push_str("  mov rdx, r11\n");
             asm.push_str("  mov rcx, r12\n");
             
-            // Call realloc (depth is 3, odd, pad by subtracting 8)
-            asm.push_str("  sub rsp, 8\n");
             asm.push_str("  call [realloc]\n");
-            asm.push_str("  add rsp, 8\n");
             
             asm.push_str("  pop r10\n");
-            asm.push_str("  pop r12\n"); // old pointer
-            asm.push_str("  mov r12, rax\n"); // new list pointer
+            asm.push_str("  pop r12\n");
+            asm.push_str("  mov r12, rax\n");
             
-            // Save updated pointer back to list variable if applicable
             if let Expr::Var(name) = list {
                 if let Some(c) = ctx {
                     if let Some(offset) = c.local_offsets.get(name) {
@@ -1323,10 +1763,76 @@ fn codegen_stmt_with_ctx(
             }
             
             asm.push_str(&format!(".L_no_realloc_{}:\n", label_idx));
-            asm.push_str("  pop r13\n"); // pop item
+            asm.push_str("  pop r13\n");
             asm.push_str("  mov [r12 + 16 + 8 * r10], r13\n");
             asm.push_str("  inc r10\n");
             asm.push_str("  mov [r12 + 8], r10\n");
+        }
+        Stmt::WriteFile { filename, content } => {
+            codegen_expr_with_ctx(filename, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  mov r12, rax\n");
+            
+            codegen_expr_with_ctx(content, asm, string_map, 1, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  mov r13, rax\n");
+            
+            asm.push_str("  mov rdx, file_mode_w\n");
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [fopen]\n");
+            
+            asm.push_str("  test rax, rax\n");
+            asm.push_str("  jz .L_file_error\n");
+            asm.push_str("  mov r12, rax\n");
+            
+            asm.push_str("  mov rcx, r13\n");
+            asm.push_str("  call [strlen]\n");
+            
+            asm.push_str("  mov r9, r12\n");
+            asm.push_str("  mov r8, rax\n");
+            asm.push_str("  mov rdx, 1\n");
+            asm.push_str("  mov rcx, r13\n");
+            asm.push_str("  call [fwrite]\n");
+            
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [fclose]\n");
+        }
+        Stmt::TryCatch { try_block, catch_block } => {
+            let label_idx = *label_counter;
+            *label_counter += 1;
+            
+            asm.push_str("  mov rax, [exception_depth]\n");
+            asm.push_str("  mov rcx, [bro_exception_handler]\n");
+            asm.push_str("  mov [saved_handlers + 8 * rax], rcx\n");
+            asm.push_str("  mov [saved_rsps + 8 * rax], rsp\n");
+            asm.push_str("  inc rax\n");
+            asm.push_str("  mov [exception_depth], rax\n");
+            asm.push_str(&format!("  mov rcx, .L_catch_{}\n", label_idx));
+            asm.push_str("  mov [bro_exception_handler], rcx\n");
+            
+            for s in try_block {
+                codegen_stmt_with_ctx(s, asm, string_map, symbol_table, function_signatures, label_counter, ctx);
+            }
+            
+            asm.push_str("  mov rax, [exception_depth]\n");
+            asm.push_str("  dec rax\n");
+            asm.push_str("  mov [exception_depth], rax\n");
+            asm.push_str("  mov rcx, [saved_handlers + 8 * rax]\n");
+            asm.push_str("  mov [bro_exception_handler], rcx\n");
+            asm.push_str(&format!("  jmp .L_end_{}\n", label_idx));
+            
+            asm.push_str(&format!(".L_catch_{}:\n", label_idx));
+            asm.push_str("  mov rax, [exception_depth]\n");
+            asm.push_str("  dec rax\n");
+            asm.push_str("  mov [exception_depth], rax\n");
+            asm.push_str("  mov rsp, [saved_rsps + 8 * rax]\n");
+            asm.push_str("  mov rcx, [saved_handlers + 8 * rax]\n");
+            asm.push_str("  mov [bro_exception_handler], rcx\n");
+            asm.push_str("  mov qword [bro_error_code], 0\n");
+            
+            for s in catch_block {
+                codegen_stmt_with_ctx(s, asm, string_map, symbol_table, function_signatures, label_counter, ctx);
+            }
+            
+            asm.push_str(&format!(".L_end_{}:\n", label_idx));
         }
         Stmt::Expr(expr) => {
             codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
@@ -1364,71 +1870,36 @@ fn codegen_expr_with_ctx(
             }
         }
         Expr::Input { id } => {
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str(&format!("  mov rdx, input_buf_{}\n", id));
             asm.push_str("  mov rcx, fmt_str_in\n");
             asm.push_str("  call [scanf]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
             asm.push_str(&format!("  mov rax, input_buf_{}\n", id));
         }
         Expr::Len(sub) => {
             codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str("  mov rcx, rax\n");
             asm.push_str("  call [strlen]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
         }
         Expr::Sleep(sub) => {
             codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str("  mov rcx, rax\n");
             asm.push_str("  call [Sleep]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
-            asm.push_str("  mov rax, 0\n"); // Return 0
+            asm.push_str("  mov rax, 0\n");
         }
         Expr::Random => {
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str("  call [rand]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
         }
         Expr::Alert { title, message } => {
             codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
             codegen_expr_with_ctx(message, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
-            asm.push_str("  pop r10\n"); // r10 contains title, rax contains message
+            asm.push_str("  pop r10\n");
             
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
-            asm.push_str("  mov rdx, rax\n"); // lpText
-            asm.push_str("  mov r8, r10\n"); // lpCaption
-            asm.push_str("  mov rcx, 0\n");   // hWnd
-            asm.push_str("  mov r9, 0\n");   // uType (MB_OK)
+            asm.push_str("  mov rdx, rax\n");
+            asm.push_str("  mov r8, r10\n");
+            asm.push_str("  mov rcx, 0\n");
+            asm.push_str("  mov r9, 0\n");
             asm.push_str("  call [MessageBoxA]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
         }
         Expr::Window { title, width, height } => {
             codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
@@ -1437,31 +1908,24 @@ fn codegen_expr_with_ctx(
             asm.push_str("  push rax\n");
             codegen_expr_with_ctx(height, asm, string_map, depth + 2, label_counter, ctx, function_signatures, symbol_table);
             
-            asm.push_str("  pop r11\n"); // width
-            asm.push_str("  pop r10\n"); // title
+            asm.push_str("  pop r11\n");
+            asm.push_str("  pop r10\n");
             
-            asm.push_str("  mov qword [rsp + 32], 0x80000000\n"); // X = CW_USEDEFAULT
-            asm.push_str("  mov qword [rsp + 40], 0x80000000\n"); // Y = CW_USEDEFAULT
-            asm.push_str("  mov [rsp + 48], r11\n");             // nWidth
-            asm.push_str("  mov [rsp + 56], rax\n");             // nHeight
-            asm.push_str("  mov qword [rsp + 64], 0\n");         // hWndParent
-            asm.push_str("  mov qword [rsp + 72], 0\n");         // hMenu
-            asm.push_str("  mov qword [rsp + 80], 0\n");         // hInstance
-            asm.push_str("  mov qword [rsp + 88], 0\n");         // lpParam
+            asm.push_str("  mov qword [rsp + 32], 0x80000000\n");
+            asm.push_str("  mov qword [rsp + 40], 0x80000000\n");
+            asm.push_str("  mov [rsp + 48], r11\n");
+            asm.push_str("  mov [rsp + 56], rax\n");
+            asm.push_str("  mov qword [rsp + 64], 0\n");
+            asm.push_str("  mov qword [rsp + 72], 0\n");
+            asm.push_str("  mov qword [rsp + 80], 0\n");
+            asm.push_str("  mov qword [rsp + 88], 0\n");
             
-            asm.push_str("  mov rcx, 0\n");                       // dwExStyle
-            asm.push_str("  mov rdx, window_class_name\n");       // lpClassName
-            asm.push_str("  mov r8, r10\n");                      // lpWindowName
-            asm.push_str("  mov r9, 0x10CF0000\n");               // dwStyle
+            asm.push_str("  mov rcx, 0\n");
+            asm.push_str("  mov rdx, window_class_name\n");
+            asm.push_str("  mov r8, r10\n");
+            asm.push_str("  mov r9, 0x10CF0000\n");
             
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str("  call [CreateWindowExA]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
             
             let label_idx = *label_counter;
             *label_counter += 1;
@@ -1509,15 +1973,8 @@ fn codegen_expr_with_ctx(
             let capacity = std::cmp::max(elements.len(), 4);
             let bytes = capacity * 8 + 16;
             
-            let pad = depth % 2 != 0;
-            if pad {
-                asm.push_str("  sub rsp, 8\n");
-            }
             asm.push_str(&format!("  mov rcx, {}\n", bytes));
             asm.push_str("  call [malloc]\n");
-            if pad {
-                asm.push_str("  add rsp, 8\n");
-            }
             
             asm.push_str(&format!("  mov qword [rax + 0], {}\n", capacity));
             asm.push_str(&format!("  mov qword [rax + 8], {}\n", elements.len()));
@@ -1533,27 +1990,113 @@ fn codegen_expr_with_ctx(
                 asm.push_str("  pop rax\n");
             }
         }
-        Expr::ListIndex { list, index } => {
-            codegen_expr_with_ctx(list, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
+        Expr::DictLiteral(entries) => {
+            asm.push_str("  mov rcx, 128\n");
+            asm.push_str("  call [malloc]\n");
+            
             asm.push_str("  push rax\n");
-            codegen_expr_with_ctx(index, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
-            asm.push_str("  pop r10\n"); // r10 = list pointer, rax = index
+            asm.push_str("  mov rcx, 16\n");
+            asm.push_str("  mov rdi, rax\n");
+            asm.push_str("  xor rax, rax\n");
+            asm.push_str("  rep stosq\n");
+            asm.push_str("  pop rax\n");
             
-            // Bounds check
-            asm.push_str("  cmp rax, 0\n");
-            asm.push_str("  jl .L_bounds_error\n");
-            asm.push_str("  mov r11, [r10 + 8]\n"); // length
-            asm.push_str("  cmp rax, r11\n");
-            asm.push_str("  jge .L_bounds_error\n");
+            if !entries.is_empty() {
+                asm.push_str("  push rax\n");
+                for entry in entries {
+                    codegen_expr_with_ctx(&entry.0, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(&entry.1, asm, string_map, depth + 2, label_counter, ctx, function_signatures, symbol_table);
+                    
+                    asm.push_str("  pop rdx\n");
+                    asm.push_str("  pop rcx\n");
+                    asm.push_str("  mov r8, rax\n");
+                    
+                    asm.push_str("  push rcx\n");
+                    asm.push_str("  call .L_dict_insert\n");
+                }
+                asm.push_str("  pop rax\n");
+            }
+        }
+        Expr::ListIndex { list, index } => {
+            let list_type = get_expr_type(list, symbol_table, function_signatures, None);
+            match list_type {
+                Type::Dict(..) => {
+                    codegen_expr_with_ctx(list, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    
+                    codegen_expr_with_ctx(index, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  pop rcx\n");
+                    asm.push_str("  mov rdx, rax\n");
+                    
+                    asm.push_str("  call .L_dict_lookup\n");
+                }
+                _ => {
+                    codegen_expr_with_ctx(list, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  push rax\n");
+                    codegen_expr_with_ctx(index, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  pop r10\n");
+                    
+                    asm.push_str("  cmp rax, 0\n");
+                    asm.push_str("  jl .L_bounds_error\n");
+                    asm.push_str("  mov r11, [r10 + 8]\n");
+                    asm.push_str("  cmp rax, r11\n");
+                    asm.push_str("  jge .L_bounds_error\n");
+                    
+                    asm.push_str("  mov rax, [r10 + 16 + 8 * rax]\n");
+                }
+            }
+        }
+        Expr::ReadFile(sub) => {
+            codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  mov r15, rax\n"); // Save filename pointer to non-volatile R15
             
-            // Load value
-            asm.push_str("  mov rax, [r10 + 16 + 8 * rax]\n");
+            asm.push_str("  mov rdx, file_mode_rb\n");
+            asm.push_str("  mov rcx, r15\n");
+            asm.push_str("  call [fopen]\n");
+            
+            asm.push_str("  test rax, rax\n");
+            asm.push_str("  jz .L_file_error\n");
+            asm.push_str("  mov r12, rax\n");
+            
+            asm.push_str("  mov r8, 2\n");
+            asm.push_str("  mov rdx, 0\n");
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [fseek]\n");
+            
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [ftell]\n");
+            asm.push_str("  mov r13, rax\n");
+            
+            asm.push_str("  mov r8, 0\n");
+            asm.push_str("  mov rdx, 0\n");
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [fseek]\n");
+            
+            asm.push_str("  mov rcx, r13\n");
+            asm.push_str("  inc rcx\n");
+            asm.push_str("  call [malloc]\n");
+            asm.push_str("  mov r14, rax\n");
+            
+            asm.push_str("  mov r9, r12\n");
+            asm.push_str("  mov r8, r13\n");
+            asm.push_str("  mov rdx, 1\n");
+            asm.push_str("  mov rcx, r14\n");
+            asm.push_str("  call [fread]\n");
+            
+            asm.push_str("  mov byte [r14 + r13], 0\n");
+            
+            asm.push_str("  mov rcx, r12\n");
+            asm.push_str("  call [fclose]\n");
+            
+            asm.push_str("  mov rax, r14\n");
         }
         Expr::Binary { op, left, right } => {
             codegen_expr_with_ctx(left, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
             codegen_expr_with_ctx(right, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
-            asm.push_str("  pop r10\n"); // r10 contains left, rax contains right
+            asm.push_str("  pop r10\n");
             
             match op {
                 Op::Add => {
@@ -1567,8 +2110,8 @@ fn codegen_expr_with_ctx(
                     asm.push_str("  imul rax, r10\n");
                 }
                 Op::Div => {
-                    asm.push_str("  mov r11, rax\n"); // right
-                    asm.push_str("  mov rax, r10\n"); // left
+                    asm.push_str("  mov r11, rax\n");
+                    asm.push_str("  mov rax, r10\n");
                     asm.push_str("  cqo\n");
                     asm.push_str("  idiv r11\n");
                 }

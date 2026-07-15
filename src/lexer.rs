@@ -18,6 +18,13 @@ pub enum Token {
     LBracket,
     RBracket,
     Append,
+    LBrace,
+    RBrace,
+    Colon,
+    WriteFile,
+    ReadFile,
+    Try,
+    Catch,
     Ident(String),
     IntLit(i64),
     StrLit(String),
@@ -58,6 +65,13 @@ impl Token {
             Token::LBracket => "[".to_string(),
             Token::RBracket => "]".to_string(),
             Token::Append => "append/anfuegen".to_string(),
+            Token::LBrace => "{".to_string(),
+            Token::RBrace => "}".to_string(),
+            Token::Colon => ":".to_string(),
+            Token::WriteFile => "write_file/schreibe_datei".to_string(),
+            Token::ReadFile => "read_file/lese_datei".to_string(),
+            Token::Try => "try/versuche".to_string(),
+            Token::Catch => "catch/fange".to_string(),
             Token::Ident(s) => format!("identifier '{}'", s),
             Token::IntLit(n) => format!("integer literal '{}'", n),
             Token::StrLit(s) => format!("string literal \"{}\"", s),
@@ -233,6 +247,10 @@ impl Lexer {
                     "fn" => Token::Fn,
                     "return" => Token::Return,
                     "append" => Token::Append,
+                    "write_file" => Token::WriteFile,
+                    "read_file" => Token::ReadFile,
+                    "try" => Token::Try,
+                    "catch" => Token::Catch,
 
                     // German keywords
                     "setze" => Token::Set,
@@ -250,6 +268,10 @@ impl Lexer {
                     "funktion" => Token::Fn,
                     "rueckgabe" | "zurueck" => Token::Return,
                     "anfuegen" => Token::Append,
+                    "schreibe_datei" => Token::WriteFile,
+                    "lese_datei" => Token::ReadFile,
+                    "versuche" => Token::Try,
+                    "fange" => Token::Catch,
 
                     // Generic Identifier
                     _ => Token::Ident(ident_str),
@@ -307,6 +329,9 @@ impl Lexer {
                 ',' => { self.advance(); Some((Token::Comma, 1)) }
                 '[' => { self.advance(); Some((Token::LBracket, 1)) }
                 ']' => { self.advance(); Some((Token::RBracket, 1)) }
+                '{' => { self.advance(); Some((Token::LBrace, 1)) }
+                '}' => { self.advance(); Some((Token::RBrace, 1)) }
+                ':' => { self.advance(); Some((Token::Colon, 1)) }
                 '=' => {
                     self.advance();
                     if self.peek() == Some('=') {
