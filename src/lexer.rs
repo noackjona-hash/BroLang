@@ -15,6 +15,9 @@ pub enum Token {
     Comma,
     Fn,
     Return,
+    LBracket,
+    RBracket,
+    Append,
     Ident(String),
     IntLit(i64),
     StrLit(String),
@@ -52,6 +55,9 @@ impl Token {
             Token::Comma => ",".to_string(),
             Token::Fn => "fn/funktion".to_string(),
             Token::Return => "return/rueckgabe/zurueck".to_string(),
+            Token::LBracket => "[".to_string(),
+            Token::RBracket => "]".to_string(),
+            Token::Append => "append/anfuegen".to_string(),
             Token::Ident(s) => format!("identifier '{}'", s),
             Token::IntLit(n) => format!("integer literal '{}'", n),
             Token::StrLit(s) => format!("string literal \"{}\"", s),
@@ -226,6 +232,7 @@ impl Lexer {
                     "window" => Token::Window,
                     "fn" => Token::Fn,
                     "return" => Token::Return,
+                    "append" => Token::Append,
 
                     // German keywords
                     "setze" => Token::Set,
@@ -242,6 +249,7 @@ impl Lexer {
                     "fenster" => Token::Window,
                     "funktion" => Token::Fn,
                     "rueckgabe" | "zurueck" => Token::Return,
+                    "anfuegen" => Token::Append,
 
                     // Generic Identifier
                     _ => Token::Ident(ident_str),
@@ -297,6 +305,8 @@ impl Lexer {
                 '(' => { self.advance(); Some((Token::LParen, 1)) }
                 ')' => { self.advance(); Some((Token::RParen, 1)) }
                 ',' => { self.advance(); Some((Token::Comma, 1)) }
+                '[' => { self.advance(); Some((Token::LBracket, 1)) }
+                ']' => { self.advance(); Some((Token::RBracket, 1)) }
                 '=' => {
                     self.advance();
                     if self.peek() == Some('=') {

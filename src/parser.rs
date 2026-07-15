@@ -43,6 +43,8 @@ pub enum Expr {
     Alert { title: Box<Expr>, message: Box<Expr> },
     Window { title: Box<Expr>, width: Box<Expr>, height: Box<Expr> },
     Call { name: String, args: Vec<Expr> },
+    ListLiteral(Vec<Expr>),
+    ListIndex { list: Box<Expr>, index: Box<Expr> },
     Binary {
         op: Op,
         left: Box<Expr>,
@@ -73,6 +75,10 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     Return(Option<Expr>),
+    Append {
+        list: Expr,
+        item: Expr,
+    },
     Expr(Expr),
 }
 
@@ -495,6 +501,72 @@ impl<'a> Parser<'a> {
                 self.expect_statement_end("return statement")?;
                 Ok(Stmt::Return(expr))
             }
+            Token::Append => {
+                let append_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'append' / 'anfuegen'.".to_string(),
+                    line: append_tok.line,
+                    column: append_tok.column + append_tok.length,
+                    length: 1,
+                    suggestion: "Pass parameters inside parentheses, e.g., 'append(list, item)'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'append' / 'anfuegen', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'append(list, item)'.".to_string(),
+                    });
+                }
+
+                let list = self.parse_expr()?;
+
+                let comma_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected ',' separating list and item in append call.".to_string(),
+                    line: append_tok.line,
+                    column: append_tok.column + append_tok.length + 2,
+                    length: 1,
+                    suggestion: "Add a comma between arguments, e.g., 'append(list, item)'.".to_string(),
+                })?;
+                if comma_mt.token == Token::Comma {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected ',' separating list and item in append call, but found {}.", comma_mt.token.to_string_representation()),
+                        line: comma_mt.line,
+                        column: comma_mt.column,
+                        length: comma_mt.length,
+                        suggestion: "Separate arguments with a comma, e.g., 'append(list, item)'.".to_string(),
+                    });
+                }
+
+                let item = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' at the end of append call.".to_string(),
+                    line: append_tok.line,
+                    column: append_tok.column + append_tok.length + 3,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'append(list, item)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' at the end of append call, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'append(list, item)'.".to_string(),
+                    });
+                }
+
+                self.expect_statement_end("append call")?;
+                Ok(Stmt::Append { list, item })
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect_statement_end("expression statement")?;
@@ -568,7 +640,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+    fn parse_primary_base(&mut self) -> Result<Expr, ParseError> {
         let mt = self.peek().cloned().ok_or_else(|| {
             let last_line = self.source_lines.len();
             let last_col = self.source_lines.last().map(|l| l.len() + 1).unwrap_or(1);
@@ -582,6 +654,50 @@ impl<'a> Parser<'a> {
         })?;
 
         match &mt.token {
+            Token::LBracket => {
+                let lb_tok = self.advance().unwrap().clone();
+                let mut elements = Vec::new();
+                while let Some(el_mt) = self.peek() {
+                    if el_mt.token == Token::RBracket {
+                        break;
+                    }
+                    let el_expr = self.parse_expr()?;
+                    elements.push(el_expr);
+                    
+                    if let Some(next_mt) = self.peek() {
+                        if next_mt.token == Token::Comma {
+                            self.advance();
+                        } else if next_mt.token != Token::RBracket {
+                            return Err(ParseError {
+                                message: format!("Expected ',' or ']' in list literal, but found {}.", next_mt.token.to_string_representation()),
+                                line: next_mt.line,
+                                column: next_mt.column,
+                                length: next_mt.length,
+                                suggestion: "Separate list elements with commas, e.g., '[1, 2, 3]'.".to_string(),
+                            });
+                        }
+                    }
+                }
+                let rb_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing bracket ']' at the end of list literal.".to_string(),
+                    line: lb_tok.line,
+                    column: lb_tok.column,
+                    length: 1,
+                    suggestion: "Add a closing bracket ']'.".to_string(),
+                })?;
+                if rb_mt.token == Token::RBracket {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing bracket ']' at the end of list literal, but found {}.", rb_mt.token.to_string_representation()),
+                        line: rb_mt.line,
+                        column: rb_mt.column,
+                        length: rb_mt.length,
+                        suggestion: "Add a closing bracket ']'.".to_string(),
+                    });
+                }
+                Ok(Expr::ListLiteral(elements))
+            }
             Token::IntLit(n) => {
                 let val = *n;
                 self.advance();
@@ -1017,6 +1133,41 @@ impl<'a> Parser<'a> {
                 })
             }
         }
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary_base()?;
+        while let Some(next_mt) = self.peek().cloned() {
+            if next_mt.token == Token::LBracket {
+                self.advance(); // consume '['
+                let index = self.parse_expr()?;
+                let rb_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing bracket ']' after index expression.".to_string(),
+                    line: next_mt.line,
+                    column: next_mt.column + 2,
+                    length: 1,
+                    suggestion: "Add a closing bracket ']'.".to_string(),
+                })?;
+                if rb_mt.token == Token::RBracket {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing bracket ']', but found {}.", rb_mt.token.to_string_representation()),
+                        line: rb_mt.line,
+                        column: rb_mt.column,
+                        length: rb_mt.length,
+                        suggestion: "Close the index access, e.g., 'list[index]'.".to_string(),
+                    });
+                }
+                expr = Expr::ListIndex {
+                    list: Box::new(expr),
+                    index: Box::new(index),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
     }
 }
 

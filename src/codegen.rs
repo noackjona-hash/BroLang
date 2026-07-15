@@ -5,6 +5,20 @@ use std::collections::HashMap;
 pub enum Type {
     Int,
     Str,
+    List(Box<Type>),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum Storage {
+    Global,
+    Local(i32), // Offset relative to RBP
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableInfo {
+    pub var_type: Type,
+    pub storage: Storage,
 }
 
 #[derive(Debug)]
@@ -16,12 +30,12 @@ pub struct TypeError {
 }
 
 pub struct CodegenCtx {
-    local_offsets: HashMap<String, i32>,
-    func_name: String,
+    pub local_offsets: HashMap<String, i32>,
+    pub func_name: String,
 }
 
-pub fn type_check(program: &Program) -> Result<HashMap<String, Type>, TypeError> {
-    let mut symbol_table = HashMap::new();
+pub fn type_check(program: &Program) -> Result<HashMap<String, VariableInfo>, TypeError> {
+    let mut scope_stack = vec![HashMap::new()]; // Start with global scope
     let mut function_signatures = HashMap::new();
     
     // Pre-scan functions to populate signatures
@@ -29,28 +43,29 @@ pub fn type_check(program: &Program) -> Result<HashMap<String, Type>, TypeError>
         if let Stmt::FnDef { name, params, body } = stmt {
             let mut local_symbols = HashMap::new();
             for p in params {
-                local_symbols.insert(p.clone(), Type::Int);
+                local_symbols.insert(p.clone(), VariableInfo { var_type: Type::Int, storage: Storage::Local(0) });
             }
             for s in body {
                 pre_populate_locals(s, &mut local_symbols);
             }
-            let ret_type = infer_return_type(body, &local_symbols);
+            let body_symbols_stack = vec![HashMap::new(), local_symbols];
+            let ret_type = infer_return_type(body, &body_symbols_stack);
             let param_types = vec![Type::Int; params.len()];
             function_signatures.insert(name.clone(), (param_types, ret_type));
         }
     }
     
     for stmt in &program.statements {
-        type_check_stmt(stmt, &mut symbol_table, &function_signatures, None)?;
+        type_check_stmt(stmt, &mut scope_stack, &function_signatures, None)?;
     }
-    Ok(symbol_table)
+    Ok(scope_stack.remove(0))
 }
 
-fn pre_populate_locals(stmt: &Stmt, local_symbols: &mut HashMap<String, Type>) {
+fn pre_populate_locals(stmt: &Stmt, local_symbols: &mut HashMap<String, VariableInfo>) {
     match stmt {
         Stmt::Assign { name, value, .. } => {
             let val_type = infer_expr_type_simple(value, local_symbols);
-            local_symbols.insert(name.clone(), val_type);
+            local_symbols.insert(name.clone(), VariableInfo { var_type: val_type, storage: Storage::Local(0) });
         }
         Stmt::If { then_branch, .. } => {
             for s in then_branch {
@@ -66,30 +81,44 @@ fn pre_populate_locals(stmt: &Stmt, local_symbols: &mut HashMap<String, Type>) {
     }
 }
 
-fn infer_expr_type_simple(expr: &Expr, local_symbols: &HashMap<String, Type>) -> Type {
+fn infer_expr_type_simple(expr: &Expr, local_symbols: &HashMap<String, VariableInfo>) -> Type {
     match expr {
         Expr::Int(_) => Type::Int,
         Expr::Str(_) => Type::Str,
-        Expr::Var(name) => local_symbols.get(name).cloned().unwrap_or(Type::Int),
+        Expr::Var(name) => local_symbols.get(name).map(|info| info.var_type.clone()).unwrap_or(Type::Int),
+        Expr::ListLiteral(elements) => {
+            if elements.is_empty() {
+                Type::List(Box::new(Type::Int))
+            } else {
+                Type::List(Box::new(infer_expr_type_simple(&elements[0], local_symbols)))
+            }
+        }
+        Expr::ListIndex { list, .. } => {
+            let l_type = infer_expr_type_simple(list, local_symbols);
+            match l_type {
+                Type::List(t) => *t,
+                _ => Type::Int,
+            }
+        }
         _ => Type::Int,
     }
 }
 
-fn infer_return_type(body: &[Stmt], symbol_table: &HashMap<String, Type>) -> Type {
+fn infer_return_type(body: &[Stmt], scope_stack: &[HashMap<String, VariableInfo>]) -> Type {
     for stmt in body {
-        if let Some(t) = get_stmt_return_type(stmt, symbol_table) {
+        if let Some(t) = get_stmt_return_type(stmt, scope_stack) {
             return t;
         }
     }
     Type::Int
 }
 
-fn get_stmt_return_type(stmt: &Stmt, symbol_table: &HashMap<String, Type>) -> Option<Type> {
+fn get_stmt_return_type(stmt: &Stmt, scope_stack: &[HashMap<String, VariableInfo>]) -> Option<Type> {
     match stmt {
-        Stmt::Return(Some(expr)) => Some(infer_expr_type_simple(expr, symbol_table)),
+        Stmt::Return(Some(expr)) => Some(infer_expr_type_simple_stack(expr, scope_stack)),
         Stmt::If { then_branch, .. } => {
             for s in then_branch {
-                if let Some(t) = get_stmt_return_type(s, symbol_table) {
+                if let Some(t) = get_stmt_return_type(s, scope_stack) {
                     return Some(t);
                 }
             }
@@ -97,7 +126,7 @@ fn get_stmt_return_type(stmt: &Stmt, symbol_table: &HashMap<String, Type>) -> Op
         }
         Stmt::While { body, .. } => {
             for s in body {
-                if let Some(t) = get_stmt_return_type(s, symbol_table) {
+                if let Some(t) = get_stmt_return_type(s, scope_stack) {
                     return Some(t);
                 }
             }
@@ -107,18 +136,62 @@ fn get_stmt_return_type(stmt: &Stmt, symbol_table: &HashMap<String, Type>) -> Op
     }
 }
 
+fn infer_expr_type_simple_stack(expr: &Expr, scope_stack: &[HashMap<String, VariableInfo>]) -> Type {
+    match expr {
+        Expr::Int(_) => Type::Int,
+        Expr::Str(_) => Type::Str,
+        Expr::Var(name) => resolve_variable(name, scope_stack).map(|info| info.var_type).unwrap_or(Type::Int),
+        Expr::ListLiteral(elements) => {
+            if elements.is_empty() {
+                Type::List(Box::new(Type::Int))
+            } else {
+                Type::List(Box::new(infer_expr_type_simple_stack(&elements[0], scope_stack)))
+            }
+        }
+        Expr::ListIndex { list, .. } => {
+            let l_type = infer_expr_type_simple_stack(list, scope_stack);
+            match l_type {
+                Type::List(t) => *t,
+                _ => Type::Int,
+            }
+        }
+        _ => Type::Int,
+    }
+}
+
+fn resolve_variable(name: &str, scope_stack: &[HashMap<String, VariableInfo>]) -> Option<VariableInfo> {
+    for scope in scope_stack.iter().rev() {
+        if let Some(info) = scope.get(name) {
+            return Some(info.clone());
+        }
+    }
+    None
+}
+
+fn set_variable(name: &str, var_info: VariableInfo, scope_stack: &mut [HashMap<String, VariableInfo>]) {
+    for scope in scope_stack.iter_mut().rev() {
+        if scope.contains_key(name) {
+            scope.insert(name.to_string(), var_info);
+            return;
+        }
+    }
+    if let Some(scope) = scope_stack.last_mut() {
+        scope.insert(name.to_string(), var_info);
+    }
+}
+
 fn type_check_stmt(
     stmt: &Stmt,
-    symbol_table: &mut HashMap<String, Type>,
+    scope_stack: &mut Vec<HashMap<String, VariableInfo>>,
     function_signatures: &HashMap<String, (Vec<Type>, Type)>,
     current_function: Option<&(String, Type)>,
 ) -> Result<(), TypeError> {
     match stmt {
         Stmt::Assign { name, value, name_line, name_col } => {
-            let target_type = symbol_table.get(name).cloned();
-            let val_type = type_check_expr(value, symbol_table, function_signatures, target_type, *name_line, *name_col)?;
-            if let Some(existing_type) = symbol_table.get(name) {
-                if existing_type != &val_type {
+            let target_type = resolve_variable(name, scope_stack).map(|info| info.var_type);
+            let val_type = type_check_expr(value, scope_stack, function_signatures, target_type.clone(), *name_line, *name_col)?;
+            if let Some(existing_type) = target_type {
+                if existing_type != val_type {
                     return Err(TypeError {
                         message: format!(
                             "Type mismatch for variable '{}'. It was previously defined as a {:?}, but is now assigned a {:?}.",
@@ -133,14 +206,15 @@ fn type_check_stmt(
                     });
                 }
             } else {
-                symbol_table.insert(name.clone(), val_type);
+                let storage = if scope_stack.len() > 1 { Storage::Local(0) } else { Storage::Global };
+                set_variable(name, VariableInfo { var_type: val_type, storage }, scope_stack);
             }
         }
         Stmt::Print(expr) => {
-            type_check_expr(expr, symbol_table, function_signatures, None, 1, 1)?;
+            type_check_expr(expr, scope_stack, function_signatures, None, 1, 1)?;
         }
         Stmt::If { cond, then_branch } => {
-            let cond_type = type_check_expr(cond, symbol_table, function_signatures, Some(Type::Int), 1, 1)?;
+            let cond_type = type_check_expr(cond, scope_stack, function_signatures, Some(Type::Int), 1, 1)?;
             if cond_type != Type::Int {
                 return Err(TypeError {
                     message: "The condition of an 'if' / 'wenn' statement must evaluate to a number (0 for false, non-zero for true).".to_string(),
@@ -149,12 +223,14 @@ fn type_check_stmt(
                     suggestion: "Ensure the condition is a comparison or an integer value.".to_string(),
                 });
             }
+            scope_stack.push(HashMap::new()); // Nested scope
             for s in then_branch {
-                type_check_stmt(s, symbol_table, function_signatures, current_function)?;
+                type_check_stmt(s, scope_stack, function_signatures, current_function)?;
             }
+            scope_stack.pop();
         }
         Stmt::While { cond, body } => {
-            let cond_type = type_check_expr(cond, symbol_table, function_signatures, Some(Type::Int), 1, 1)?;
+            let cond_type = type_check_expr(cond, scope_stack, function_signatures, Some(Type::Int), 1, 1)?;
             if cond_type != Type::Int {
                 return Err(TypeError {
                     message: "The condition of a 'while' / 'solange' statement must evaluate to a number (0 for false, non-zero for true).".to_string(),
@@ -163,27 +239,33 @@ fn type_check_stmt(
                     suggestion: "Ensure the condition is a comparison or an integer value.".to_string(),
                 });
             }
+            scope_stack.push(HashMap::new()); // Nested scope
             for s in body {
-                type_check_stmt(s, symbol_table, function_signatures, current_function)?;
+                type_check_stmt(s, scope_stack, function_signatures, current_function)?;
             }
+            scope_stack.pop();
         }
         Stmt::FnDef { name, params, body } => {
             let (_, ret_type) = function_signatures.get(name).unwrap();
             let mut local_symbols = HashMap::new();
             for p in params {
-                local_symbols.insert(p.clone(), Type::Int);
+                local_symbols.insert(p.clone(), VariableInfo { var_type: Type::Int, storage: Storage::Local(0) });
             }
             for s in body {
                 pre_populate_locals(s, &mut local_symbols);
             }
+            
+            // Push local scope
+            scope_stack.push(local_symbols);
             for s in body {
-                type_check_stmt(s, &mut local_symbols, function_signatures, Some(&(name.clone(), ret_type.clone())))?;
+                type_check_stmt(s, scope_stack, function_signatures, Some(&(name.clone(), ret_type.clone())))?;
             }
+            scope_stack.pop();
         }
         Stmt::Return(expr_opt) => {
             if let Some((func_name, ret_type)) = current_function {
                 let val_type = if let Some(expr) = expr_opt {
-                    type_check_expr(expr, symbol_table, function_signatures, Some(ret_type.clone()), 1, 1)?
+                    type_check_expr(expr, scope_stack, function_signatures, Some(ret_type.clone()), 1, 1)?
                 } else {
                     Type::Int
                 };
@@ -207,8 +289,31 @@ fn type_check_stmt(
                 });
             }
         }
+        Stmt::Append { list, item } => {
+            let list_type = type_check_expr(list, scope_stack, function_signatures, None, 1, 1)?;
+            let item_expected = match &list_type {
+                Type::List(t) => Some((**t).clone()),
+                _ => {
+                    return Err(TypeError {
+                        message: "The first argument of 'append' / 'anfuegen' must be a List.".to_string(),
+                        line: 1,
+                        column: 1,
+                        suggestion: "Ensure you are passing a list variable, e.g., 'append(my_list, item)'.".to_string(),
+                    });
+                }
+            };
+            let item_type = type_check_expr(item, scope_stack, function_signatures, item_expected.clone(), 1, 1)?;
+            if Some(&item_type) != item_expected.as_ref() {
+                return Err(TypeError {
+                    message: format!("Type mismatch in append. Cannot append a {:?} to a List of {:?}.", item_type, item_expected.unwrap()),
+                    line: 1,
+                    column: 1,
+                    suggestion: "Make sure the appended item type matches the list elements type.".to_string(),
+                });
+            }
+        }
         Stmt::Expr(expr) => {
-            type_check_expr(expr, symbol_table, function_signatures, None, 1, 1)?;
+            type_check_expr(expr, scope_stack, function_signatures, None, 1, 1)?;
         }
     }
     Ok(())
@@ -216,7 +321,7 @@ fn type_check_stmt(
 
 fn type_check_expr(
     expr: &Expr,
-    symbol_table: &HashMap<String, Type>,
+    scope_stack: &mut Vec<HashMap<String, VariableInfo>>,
     function_signatures: &HashMap<String, (Vec<Type>, Type)>,
     expected_type: Option<Type>,
     line: usize,
@@ -226,8 +331,8 @@ fn type_check_expr(
         Expr::Int(_) => Ok(Type::Int),
         Expr::Str(_) => Ok(Type::Str),
         Expr::Var(name) => {
-            if let Some(t) = symbol_table.get(name) {
-                Ok(t.clone())
+            if let Some(info) = resolve_variable(name, scope_stack) {
+                Ok(info.var_type)
             } else {
                 Err(TypeError {
                     message: format!("Variable '{}' is used before being set.", name),
@@ -241,7 +346,7 @@ fn type_check_expr(
             Ok(expected_type.unwrap_or(Type::Str))
         }
         Expr::Len(sub) => {
-            let sub_type = type_check_expr(sub, symbol_table, function_signatures, Some(Type::Str), line, column)?;
+            let sub_type = type_check_expr(sub, scope_stack, function_signatures, Some(Type::Str), line, column)?;
             if sub_type != Type::Str {
                 return Err(TypeError {
                     message: "The 'len' / 'laenge' function requires a string argument.".to_string(),
@@ -253,7 +358,7 @@ fn type_check_expr(
             Ok(Type::Int)
         }
         Expr::Sleep(sub) => {
-            let sub_type = type_check_expr(sub, symbol_table, function_signatures, Some(Type::Int), line, column)?;
+            let sub_type = type_check_expr(sub, scope_stack, function_signatures, Some(Type::Int), line, column)?;
             if sub_type != Type::Int {
                 return Err(TypeError {
                     message: "The 'sleep' / 'warte' function requires a number argument (milliseconds).".to_string(),
@@ -268,8 +373,8 @@ fn type_check_expr(
             Ok(Type::Int)
         }
         Expr::Alert { title, message } => {
-            let t_type = type_check_expr(title, symbol_table, function_signatures, Some(Type::Str), line, column)?;
-            let m_type = type_check_expr(message, symbol_table, function_signatures, Some(Type::Str), line, column)?;
+            let t_type = type_check_expr(title, scope_stack, function_signatures, Some(Type::Str), line, column)?;
+            let m_type = type_check_expr(message, scope_stack, function_signatures, Some(Type::Str), line, column)?;
             if t_type != Type::Str || m_type != Type::Str {
                 return Err(TypeError {
                     message: "The 'alert' / 'info' function requires two string arguments (title and message).".to_string(),
@@ -281,9 +386,9 @@ fn type_check_expr(
             Ok(Type::Int)
         }
         Expr::Window { title, width, height } => {
-            let t_type = type_check_expr(title, symbol_table, function_signatures, Some(Type::Str), line, column)?;
-            let w_type = type_check_expr(width, symbol_table, function_signatures, Some(Type::Int), line, column)?;
-            let h_type = type_check_expr(height, symbol_table, function_signatures, Some(Type::Int), line, column)?;
+            let t_type = type_check_expr(title, scope_stack, function_signatures, Some(Type::Str), line, column)?;
+            let w_type = type_check_expr(width, scope_stack, function_signatures, Some(Type::Int), line, column)?;
+            let h_type = type_check_expr(height, scope_stack, function_signatures, Some(Type::Int), line, column)?;
             if t_type != Type::Str || w_type != Type::Int || h_type != Type::Int {
                 return Err(TypeError {
                     message: "The 'window' / 'fenster' function requires a string (title) and two numbers (width and height).".to_string(),
@@ -305,7 +410,7 @@ fn type_check_expr(
                     });
                 }
                 for (i, arg) in args.iter().enumerate() {
-                    let arg_type = type_check_expr(arg, symbol_table, function_signatures, Some(param_types[i].clone()), line, column)?;
+                    let arg_type = type_check_expr(arg, scope_stack, function_signatures, Some(param_types[i].clone()), line, column)?;
                     if arg_type != param_types[i] {
                         return Err(TypeError {
                             message: format!("Argument {} in call to '{}' must be of type {:?}.", i + 1, name, param_types[i]),
@@ -325,6 +430,46 @@ fn type_check_expr(
                 })
             }
         }
+        Expr::ListLiteral(elements) => {
+            if elements.is_empty() {
+                Ok(Type::List(Box::new(Type::Int)))
+            } else {
+                let first_type = type_check_expr(&elements[0], scope_stack, function_signatures, None, line, column)?;
+                for el in &elements[1..] {
+                    let el_type = type_check_expr(el, scope_stack, function_signatures, Some(first_type.clone()), line, column)?;
+                    if el_type != first_type {
+                        return Err(TypeError {
+                            message: format!("Type mismatch in list literal. Expected {:?}, but found {:?}.", first_type, el_type),
+                            line,
+                            column,
+                            suggestion: "Ensure all elements in a list literal have the same type.".to_string(),
+                        });
+                    }
+                }
+                Ok(Type::List(Box::new(first_type)))
+            }
+        }
+        Expr::ListIndex { list, index } => {
+            let list_type = type_check_expr(list, scope_stack, function_signatures, None, line, column)?;
+            let index_type = type_check_expr(index, scope_stack, function_signatures, Some(Type::Int), line, column)?;
+            if index_type != Type::Int {
+                return Err(TypeError {
+                    message: format!("Array index must be a number, but found {:?}.", index_type),
+                    line,
+                    column,
+                    suggestion: "Pass an integer literal or variable to index the list.".to_string(),
+                });
+            }
+            match list_type {
+                Type::List(t) => Ok(*t),
+                _ => Err(TypeError {
+                    message: "Cannot index a non-list variable.".to_string(),
+                    line,
+                    column,
+                    suggestion: "Verify that the variable being indexed is a list.".to_string(),
+                }),
+            }
+        }
         Expr::Binary { op, left, right } => {
             let left_expected = match op {
                 Op::Add | Op::Sub | Op::Mul | Op::Div => Some(Type::Int),
@@ -334,8 +479,8 @@ fn type_check_expr(
                 Op::Add | Op::Sub | Op::Mul | Op::Div => Some(Type::Int),
                 _ => None,
             };
-            let left_type = type_check_expr(left, symbol_table, function_signatures, left_expected, line, column)?;
-            let right_type = type_check_expr(right, symbol_table, function_signatures, right_expected, line, column)?;
+            let left_type = type_check_expr(left, scope_stack, function_signatures, left_expected, line, column)?;
+            let right_type = type_check_expr(right, scope_stack, function_signatures, right_expected, line, column)?;
             match op {
                 Op::Add | Op::Sub | Op::Mul | Op::Div => {
                     if left_type == Type::Int && right_type == Type::Int {
@@ -414,6 +559,10 @@ fn collect_stmt_strings(stmt: &Stmt, literals: &mut Vec<String>) {
                 collect_expr_strings(expr, literals);
             }
         }
+        Stmt::Append { list, item } => {
+            collect_expr_strings(list, literals);
+            collect_expr_strings(item, literals);
+        }
         Stmt::Expr(expr) => collect_expr_strings(expr, literals),
     }
 }
@@ -441,6 +590,15 @@ fn collect_expr_strings(expr: &Expr, literals: &mut Vec<String>) {
                 collect_expr_strings(arg, literals);
             }
         }
+        Expr::ListLiteral(elements) => {
+            for el in elements {
+                collect_expr_strings(el, literals);
+            }
+        }
+        Expr::ListIndex { list, index } => {
+            collect_expr_strings(list, literals);
+            collect_expr_strings(index, literals);
+        }
         Expr::Binary { left, right, .. } => {
             collect_expr_strings(left, literals);
             collect_expr_strings(right, literals);
@@ -449,7 +607,7 @@ fn collect_expr_strings(expr: &Expr, literals: &mut Vec<String>) {
     }
 }
 
-fn collect_input_ids(program: &Program, symbol_table: &HashMap<String, Type>) -> Vec<usize> {
+fn collect_input_ids(program: &Program, symbol_table: &HashMap<String, VariableInfo>) -> Vec<usize> {
     let mut ids = Vec::new();
     for stmt in &program.statements {
         collect_stmt_inputs(stmt, symbol_table, &mut ids);
@@ -457,11 +615,11 @@ fn collect_input_ids(program: &Program, symbol_table: &HashMap<String, Type>) ->
     ids
 }
 
-fn collect_stmt_inputs(stmt: &Stmt, symbol_table: &HashMap<String, Type>, ids: &mut Vec<usize>) {
+fn collect_stmt_inputs(stmt: &Stmt, symbol_table: &HashMap<String, VariableInfo>, ids: &mut Vec<usize>) {
     match stmt {
         Stmt::Assign { name, value, .. } => {
             let is_int_input = if let Expr::Input { .. } = value {
-                symbol_table.get(name) == Some(&Type::Int)
+                symbol_table.get(name).map(|info| info.var_type.clone()) == Some(Type::Int)
             } else {
                 false
             };
@@ -492,6 +650,10 @@ fn collect_stmt_inputs(stmt: &Stmt, symbol_table: &HashMap<String, Type>, ids: &
                 collect_expr_inputs(expr, ids);
             }
         }
+        Stmt::Append { list, item } => {
+            collect_expr_inputs(list, ids);
+            collect_expr_inputs(item, ids);
+        }
         Stmt::Expr(expr) => collect_expr_inputs(expr, ids),
     }
 }
@@ -518,6 +680,15 @@ fn collect_expr_inputs(expr: &Expr, ids: &mut Vec<usize>) {
             for arg in args {
                 collect_expr_inputs(arg, ids);
             }
+        }
+        Expr::ListLiteral(elements) => {
+            for el in elements {
+                collect_expr_inputs(el, ids);
+            }
+        }
+        Expr::ListIndex { list, index } => {
+            collect_expr_inputs(list, ids);
+            collect_expr_inputs(index, ids);
         }
         Expr::Binary { left, right, .. } => {
             collect_expr_inputs(left, ids);
@@ -577,6 +748,9 @@ fn stmt_has_gui(stmt: &Stmt) -> bool {
                 false
             }
         }
+        Stmt::Append { list, item } => {
+            expr_has_gui(list) || expr_has_gui(item)
+        }
         Stmt::Expr(expr) => expr_has_gui(expr),
     }
 }
@@ -594,6 +768,17 @@ fn expr_has_gui(expr: &Expr) -> bool {
             }
             false
         }
+        Expr::ListLiteral(elements) => {
+            for el in elements {
+                if expr_has_gui(el) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expr::ListIndex { list, index } => {
+            expr_has_gui(list) || expr_has_gui(index)
+        }
         Expr::Binary { left, right, .. } => expr_has_gui(left) || expr_has_gui(right),
         _ => false,
     }
@@ -605,14 +790,14 @@ fn escape_fasm_string(s: &str) -> String {
 
 fn get_expr_type(
     expr: &Expr,
-    symbol_table: &HashMap<String, Type>,
+    symbol_table: &HashMap<String, VariableInfo>,
     function_signatures: &HashMap<String, (Vec<Type>, Type)>,
     expected_type: Option<Type>,
 ) -> Type {
     match expr {
         Expr::Int(_) => Type::Int,
         Expr::Str(_) => Type::Str,
-        Expr::Var(name) => symbol_table.get(name).cloned().unwrap_or(Type::Int),
+        Expr::Var(name) => symbol_table.get(name).map(|info| info.var_type.clone()).unwrap_or(Type::Int),
         Expr::Input { .. } => expected_type.unwrap_or(Type::Str),
         Expr::Len(_) => Type::Int,
         Expr::Sleep(_) => Type::Int,
@@ -626,10 +811,24 @@ fn get_expr_type(
                 Type::Int
             }
         }
+        Expr::ListLiteral(elements) => {
+            if elements.is_empty() {
+                Type::List(Box::new(Type::Int))
+            } else {
+                Type::List(Box::new(get_expr_type(&elements[0], symbol_table, function_signatures, expected_type)))
+            }
+        }
+        Expr::ListIndex { list, .. } => {
+            let l_type = get_expr_type(list, symbol_table, function_signatures, expected_type);
+            match l_type {
+                Type::List(t) => *t,
+                _ => Type::Int,
+            }
+        }
         Expr::Binary { op, .. } => {
             match op {
                 Op::Add | Op::Sub | Op::Mul | Op::Div => Type::Int,
-                Op::Eq | Op::NotEq | Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => Type::Int,
+                _ => Type::Int,
             }
         }
     }
@@ -664,7 +863,7 @@ fn collect_stmt_locals(stmt: &Stmt, params: &[String], locals: &mut Vec<String>)
     }
 }
 
-pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>) -> String {
+pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, VariableInfo>) -> String {
     let mut asm = String::new();
     let has_gui = has_gui_calls(program);
     let stack_res = if has_gui { 104 } else { 40 };
@@ -675,12 +874,13 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
         if let Stmt::FnDef { name, params, body } = stmt {
             let mut local_symbols = HashMap::new();
             for p in params {
-                local_symbols.insert(p.clone(), Type::Int);
+                local_symbols.insert(p.clone(), VariableInfo { var_type: Type::Int, storage: Storage::Local(0) });
             }
             for s in body {
                 pre_populate_locals(s, &mut local_symbols);
             }
-            let ret_type = infer_return_type(body, &local_symbols);
+            let body_symbols_stack = vec![HashMap::new(), local_symbols];
+            let ret_type = infer_return_type(body, &body_symbols_stack);
             let param_types = vec![Type::Int; params.len()];
             function_signatures.insert(name.clone(), (param_types, ret_type));
         }
@@ -706,6 +906,7 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
     asm.push_str("  fmt_str db '%s', 13, 10, 0\n");
     asm.push_str("  fmt_int_in db '%lld', 0\n");
     asm.push_str("  fmt_str_in db '%s', 0\n");
+    asm.push_str("  bounds_err_msg db 'Error: Array index out of bounds.', 13, 10, 0\n");
     
     for (lit, idx) in &string_map {
         let escaped = escape_fasm_string(lit);
@@ -717,8 +918,10 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
     }
     
     // Global variables in symbol_table
-    for var_name in symbol_table.keys() {
-        asm.push_str(&format!("  var_{} dq 0\n", var_name));
+    for (var_name, var_info) in symbol_table {
+        if let Storage::Global = var_info.storage {
+            asm.push_str(&format!("  var_{} dq 0\n", var_name));
+        }
     }
     
     if has_gui {
@@ -799,15 +1002,8 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
             }
             
             // Generate code for statements inside the function body
-            let mut local_symbols = HashMap::new();
-            for p in params {
-                local_symbols.insert(p.clone(), Type::Int);
-            }
             for s in body {
-                pre_populate_locals(s, &mut local_symbols);
-            }
-            for s in body {
-                codegen_stmt_with_ctx(s, &mut functions_asm, &string_map, &local_symbols, &function_signatures, &mut label_counter, Some(&ctx));
+                codegen_stmt_with_ctx(s, &mut functions_asm, &string_map, symbol_table, &function_signatures, &mut label_counter, Some(&ctx));
             }
             
             // Epilogue
@@ -821,6 +1017,15 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
     }
     
     asm.push_str("  mov rcx, 0\n");
+    asm.push_str("  call [ExitProcess]\n\n");
+    
+    // Bounds check error handler
+    asm.push_str(".L_bounds_error:\n");
+    asm.push_str("  sub rsp, 40\n");
+    asm.push_str("  mov rdx, bounds_err_msg\n");
+    asm.push_str("  mov rcx, fmt_str\n");
+    asm.push_str("  call [printf]\n");
+    asm.push_str("  mov rcx, 1\n");
     asm.push_str("  call [ExitProcess]\n\n");
     
     // Append compiled functions to the text section
@@ -867,12 +1072,16 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
     asm.push_str("    dq rva msvcrt_scanf\n");
     asm.push_str("    dq rva msvcrt_strlen\n");
     asm.push_str("    dq rva msvcrt_rand\n");
+    asm.push_str("    dq rva msvcrt_malloc\n");
+    asm.push_str("    dq rva msvcrt_realloc\n");
     asm.push_str("    dq 0\n\n");
     asm.push_str("  msvcrt_address:\n");
     asm.push_str("    printf      dq rva msvcrt_printf\n");
     asm.push_str("    scanf       dq rva msvcrt_scanf\n");
     asm.push_str("    strlen      dq rva msvcrt_strlen\n");
     asm.push_str("    rand        dq rva msvcrt_rand\n");
+    asm.push_str("    malloc      dq rva msvcrt_malloc\n");
+    asm.push_str("    realloc     dq rva msvcrt_realloc\n");
     asm.push_str("    dq 0\n\n");
     
     // USER32 (conditional)
@@ -918,7 +1127,11 @@ pub fn generate_assembly(program: &Program, symbol_table: &HashMap<String, Type>
     asm.push_str("  msvcrt_strlen        dw 0\n");
     asm.push_str("                       db 'strlen', 0\n");
     asm.push_str("  msvcrt_rand          dw 0\n");
-    asm.push_str("                       db 'rand', 0\n\n");
+    asm.push_str("                       db 'rand', 0\n");
+    asm.push_str("  msvcrt_malloc        dw 0\n");
+    asm.push_str("                       db 'malloc', 0\n");
+    asm.push_str("  msvcrt_realloc       dw 0\n");
+    asm.push_str("                       db 'realloc', 0\n\n");
     
     if has_gui {
         asm.push_str("  user32_MessageBoxA      dw 0\n");
@@ -944,7 +1157,7 @@ fn codegen_stmt_with_ctx(
     stmt: &Stmt,
     asm: &mut String,
     string_map: &HashMap<String, usize>,
-    symbol_table: &HashMap<String, Type>,
+    symbol_table: &HashMap<String, VariableInfo>,
     function_signatures: &HashMap<String, (Vec<Type>, Type)>,
     label_counter: &mut usize,
     ctx: Option<&CodegenCtx>,
@@ -952,7 +1165,7 @@ fn codegen_stmt_with_ctx(
     match stmt {
         Stmt::Assign { name, value, .. } => {
             if let Expr::Input { id } = value {
-                let target_type = symbol_table.get(name).cloned().unwrap_or(Type::Str);
+                let target_type = symbol_table.get(name).map(|info| info.var_type.clone()).unwrap_or(Type::Str);
                 match target_type {
                     Type::Int => {
                         if let Some(c) = ctx {
@@ -976,7 +1189,7 @@ fn codegen_stmt_with_ctx(
                             asm.push_str(&format!("  mov rax, [var_{}]\n", name));
                         }
                     }
-                    Type::Str => {
+                    _ => {
                         asm.push_str(&format!("  mov rdx, input_buf_{}\n", id));
                         asm.push_str("  mov rcx, fmt_str_in\n");
                         asm.push_str("  call [scanf]\n");
@@ -993,7 +1206,7 @@ fn codegen_stmt_with_ctx(
                     }
                 }
             } else {
-                codegen_expr_with_ctx(value, asm, string_map, 0, label_counter, ctx, function_signatures);
+                codegen_expr_with_ctx(value, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
                 if let Some(c) = ctx {
                     if let Some(offset) = c.local_offsets.get(name) {
                         asm.push_str(&format!("  mov [rbp {}], rax\n", if *offset >= 0 { format!("+ {}", offset) } else { format!("- {}", -offset) }));
@@ -1006,7 +1219,7 @@ fn codegen_stmt_with_ctx(
             }
         }
         Stmt::Print(expr) => {
-            codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
             let expr_type = get_expr_type(expr, symbol_table, function_signatures, None);
             asm.push_str("  mov rdx, rax\n");
             match expr_type {
@@ -1016,13 +1229,17 @@ fn codegen_stmt_with_ctx(
                 Type::Str => {
                     asm.push_str("  mov rcx, fmt_str\n");
                 }
+                Type::List(_) => {
+                    // For lists, we just print the heap pointer as integer for simplicity
+                    asm.push_str("  mov rcx, fmt_int\n");
+                }
             }
             asm.push_str("  call [printf]\n");
         }
         Stmt::If { cond, then_branch } => {
             let label_idx = *label_counter;
             *label_counter += 1;
-            codegen_expr_with_ctx(cond, asm, string_map, 0, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(cond, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  cmp rax, 0\n");
             asm.push_str(&format!("  je .L_end_{}\n", label_idx));
             for s in then_branch {
@@ -1034,7 +1251,7 @@ fn codegen_stmt_with_ctx(
             let label_idx = *label_counter;
             *label_counter += 1;
             asm.push_str(&format!(".L_cond_{}:\n", label_idx));
-            codegen_expr_with_ctx(cond, asm, string_map, 0, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(cond, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  cmp rax, 0\n");
             asm.push_str(&format!("  je .L_end_{}\n", label_idx));
             for s in body {
@@ -1043,12 +1260,10 @@ fn codegen_stmt_with_ctx(
             asm.push_str(&format!("  jmp .L_cond_{}\n", label_idx));
             asm.push_str(&format!(".L_end_{}:\n", label_idx));
         }
-        Stmt::FnDef { .. } => {
-            // Already handled by separate iteration in generate_assembly
-        }
+        Stmt::FnDef { .. } => {}
         Stmt::Return(expr_opt) => {
             if let Some(expr) = expr_opt {
-                codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures);
+                codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
             } else {
                 asm.push_str("  mov rax, 0\n");
             }
@@ -1056,8 +1271,65 @@ fn codegen_stmt_with_ctx(
                 asm.push_str(&format!("  jmp .L_epilogue_{}\n", c.func_name));
             }
         }
+        Stmt::Append { list, item } => {
+            let label_idx = *label_counter;
+            *label_counter += 1;
+            
+            codegen_expr_with_ctx(list, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  push rax\n");
+            
+            codegen_expr_with_ctx(item, asm, string_map, 1, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  pop r12\n"); // r12 = list pointer
+            asm.push_str("  push rax\n"); // save item on stack (depth=1)
+            
+            asm.push_str("  mov r10, [r12 + 8]\n"); // length
+            asm.push_str("  mov r11, [r12 + 0]\n"); // capacity
+            
+            asm.push_str("  cmp r10, r11\n");
+            asm.push_str(&format!("  jne .L_no_realloc_{}\n", label_idx));
+            
+            // Reallocate
+            asm.push_str("  shl r11, 1\n"); // capacity = capacity * 2
+            asm.push_str("  mov [r12 + 0], r11\n");
+            asm.push_str("  imul r11, 8\n");
+            asm.push_str("  add r11, 16\n"); // new_bytes = capacity * 8 + 16
+            
+            asm.push_str("  push r12\n"); // save old list pointer (depth=2)
+            asm.push_str("  push r10\n"); // save length (depth=3)
+            
+            asm.push_str("  mov rdx, r11\n");
+            asm.push_str("  mov rcx, r12\n");
+            
+            // Call realloc (depth is 3, odd, pad by subtracting 8)
+            asm.push_str("  sub rsp, 8\n");
+            asm.push_str("  call [realloc]\n");
+            asm.push_str("  add rsp, 8\n");
+            
+            asm.push_str("  pop r10\n");
+            asm.push_str("  pop r12\n"); // old pointer
+            asm.push_str("  mov r12, rax\n"); // new list pointer
+            
+            // Save updated pointer back to list variable if applicable
+            if let Expr::Var(name) = list {
+                if let Some(c) = ctx {
+                    if let Some(offset) = c.local_offsets.get(name) {
+                        asm.push_str(&format!("  mov [rbp {}], r12\n", if *offset >= 0 { format!("+ {}", offset) } else { format!("- {}", -offset) }));
+                    } else {
+                        asm.push_str(&format!("  mov [var_{}], r12\n", name));
+                    }
+                } else {
+                    asm.push_str(&format!("  mov [var_{}], r12\n", name));
+                }
+            }
+            
+            asm.push_str(&format!(".L_no_realloc_{}:\n", label_idx));
+            asm.push_str("  pop r13\n"); // pop item
+            asm.push_str("  mov [r12 + 16 + 8 * r10], r13\n");
+            asm.push_str("  inc r10\n");
+            asm.push_str("  mov [r12 + 8], r10\n");
+        }
         Stmt::Expr(expr) => {
-            codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(expr, asm, string_map, 0, label_counter, ctx, function_signatures, symbol_table);
         }
     }
 }
@@ -1070,6 +1342,7 @@ fn codegen_expr_with_ctx(
     label_counter: &mut usize,
     ctx: Option<&CodegenCtx>,
     function_signatures: &HashMap<String, (Vec<Type>, Type)>,
+    symbol_table: &HashMap<String, VariableInfo>,
 ) {
     match expr {
         Expr::Int(val) => {
@@ -1104,7 +1377,7 @@ fn codegen_expr_with_ctx(
             asm.push_str(&format!("  mov rax, input_buf_{}\n", id));
         }
         Expr::Len(sub) => {
-            codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             let pad = depth % 2 != 0;
             if pad {
                 asm.push_str("  sub rsp, 8\n");
@@ -1116,7 +1389,7 @@ fn codegen_expr_with_ctx(
             }
         }
         Expr::Sleep(sub) => {
-            codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(sub, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             let pad = depth % 2 != 0;
             if pad {
                 asm.push_str("  sub rsp, 8\n");
@@ -1139,9 +1412,9 @@ fn codegen_expr_with_ctx(
             }
         }
         Expr::Alert { title, message } => {
-            codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
-            codegen_expr_with_ctx(message, asm, string_map, depth + 1, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(message, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  pop r10\n"); // r10 contains title, rax contains message
             
             let pad = depth % 2 != 0;
@@ -1158,11 +1431,11 @@ fn codegen_expr_with_ctx(
             }
         }
         Expr::Window { title, width, height } => {
-            codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(title, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
-            codegen_expr_with_ctx(width, asm, string_map, depth + 1, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(width, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
-            codegen_expr_with_ctx(height, asm, string_map, depth + 2, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(height, asm, string_map, depth + 2, label_counter, ctx, function_signatures, symbol_table);
             
             asm.push_str("  pop r11\n"); // width
             asm.push_str("  pop r10\n"); // title
@@ -1211,21 +1484,15 @@ fn codegen_expr_with_ctx(
         }
         Expr::Call { name, args } => {
             let num_args = args.len();
-            
-            // 1. Evaluate and push each argument
             for i in 0..num_args {
-                codegen_expr_with_ctx(&args[i], asm, string_map, depth + i, label_counter, ctx, function_signatures);
+                codegen_expr_with_ctx(&args[i], asm, string_map, depth + i, label_counter, ctx, function_signatures, symbol_table);
                 if i < 4 {
                     asm.push_str("  push rax\n");
                 } else {
-                    // Offset above shadow space relative to caller RSP
-                    // depth at this point is 4.
                     let offset = 32 + 8 * (i - 4);
                     asm.push_str(&format!("  mov [rsp + {}], rax\n", offset + 32));
                 }
             }
-            
-            // 2. Pop parameters into registers
             for idx in (0..std::cmp::min(num_args, 4)).rev() {
                 let reg = match idx {
                     0 => "rcx",
@@ -1236,14 +1503,56 @@ fn codegen_expr_with_ctx(
                 };
                 asm.push_str(&format!("  pop {}\n", reg));
             }
-            
-            // 3. Perform function call
             asm.push_str(&format!("  call fn_{}\n", name));
         }
-        Expr::Binary { op, left, right } => {
-            codegen_expr_with_ctx(left, asm, string_map, depth, label_counter, ctx, function_signatures);
+        Expr::ListLiteral(elements) => {
+            let capacity = std::cmp::max(elements.len(), 4);
+            let bytes = capacity * 8 + 16;
+            
+            let pad = depth % 2 != 0;
+            if pad {
+                asm.push_str("  sub rsp, 8\n");
+            }
+            asm.push_str(&format!("  mov rcx, {}\n", bytes));
+            asm.push_str("  call [malloc]\n");
+            if pad {
+                asm.push_str("  add rsp, 8\n");
+            }
+            
+            asm.push_str(&format!("  mov qword [rax + 0], {}\n", capacity));
+            asm.push_str(&format!("  mov qword [rax + 8], {}\n", elements.len()));
+            
+            if !elements.is_empty() {
+                asm.push_str("  push rax\n");
+                for (i, el) in elements.iter().enumerate() {
+                    codegen_expr_with_ctx(el, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
+                    asm.push_str("  pop r10\n");
+                    asm.push_str(&format!("  mov [r10 + 16 + 8 * {}], rax\n", i));
+                    asm.push_str("  push r10\n");
+                }
+                asm.push_str("  pop rax\n");
+            }
+        }
+        Expr::ListIndex { list, index } => {
+            codegen_expr_with_ctx(list, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  push rax\n");
-            codegen_expr_with_ctx(right, asm, string_map, depth + 1, label_counter, ctx, function_signatures);
+            codegen_expr_with_ctx(index, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  pop r10\n"); // r10 = list pointer, rax = index
+            
+            // Bounds check
+            asm.push_str("  cmp rax, 0\n");
+            asm.push_str("  jl .L_bounds_error\n");
+            asm.push_str("  mov r11, [r10 + 8]\n"); // length
+            asm.push_str("  cmp rax, r11\n");
+            asm.push_str("  jge .L_bounds_error\n");
+            
+            // Load value
+            asm.push_str("  mov rax, [r10 + 16 + 8 * rax]\n");
+        }
+        Expr::Binary { op, left, right } => {
+            codegen_expr_with_ctx(left, asm, string_map, depth, label_counter, ctx, function_signatures, symbol_table);
+            asm.push_str("  push rax\n");
+            codegen_expr_with_ctx(right, asm, string_map, depth + 1, label_counter, ctx, function_signatures, symbol_table);
             asm.push_str("  pop r10\n"); // r10 contains left, rax contains right
             
             match op {
