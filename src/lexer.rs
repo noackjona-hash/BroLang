@@ -10,6 +10,9 @@ pub enum Token {
     Len,
     Sleep,
     Random,
+    Alert,
+    Window,
+    Comma,
     Ident(String),
     IntLit(i64),
     StrLit(String),
@@ -42,6 +45,9 @@ impl Token {
             Token::Len => "len/laenge".to_string(),
             Token::Sleep => "sleep/warte".to_string(),
             Token::Random => "random/zufall".to_string(),
+            Token::Alert => "alert/info".to_string(),
+            Token::Window => "window/fenster".to_string(),
+            Token::Comma => ",".to_string(),
             Token::Ident(s) => format!("identifier '{}'", s),
             Token::IntLit(n) => format!("integer literal '{}'", n),
             Token::StrLit(s) => format!("string literal \"{}\"", s),
@@ -212,6 +218,8 @@ impl Lexer {
                     "len" => Token::Len,
                     "sleep" => Token::Sleep,
                     "random" => Token::Random,
+                    "alert" => Token::Alert,
+                    "window" => Token::Window,
 
                     // German keywords
                     "setze" => Token::Set,
@@ -224,6 +232,8 @@ impl Lexer {
                     "laenge" => Token::Len,
                     "warte" => Token::Sleep,
                     "zufall" => Token::Random,
+                    "info" => Token::Alert,
+                    "fenster" => Token::Window,
 
                     // Generic Identifier
                     _ => Token::Ident(ident_str),
@@ -278,6 +288,7 @@ impl Lexer {
                 '/' => { self.advance(); Some((Token::Slash, 1)) }
                 '(' => { self.advance(); Some((Token::LParen, 1)) }
                 ')' => { self.advance(); Some((Token::RParen, 1)) }
+                ',' => { self.advance(); Some((Token::Comma, 1)) }
                 '=' => {
                     self.advance();
                     if self.peek() == Some('=') {

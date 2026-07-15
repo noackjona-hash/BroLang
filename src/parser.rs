@@ -40,6 +40,8 @@ pub enum Expr {
     Len(Box<Expr>),
     Sleep(Box<Expr>),
     Random,
+    Alert { title: Box<Expr>, message: Box<Expr> },
+    Window { title: Box<Expr>, width: Box<Expr>, height: Box<Expr> },
     Binary {
         op: Op,
         left: Box<Expr>,
@@ -642,6 +644,164 @@ impl<'a> Parser<'a> {
                 }
 
                 Ok(Expr::Random)
+            }
+            Token::Alert => {
+                let alert_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'alert' / 'info'.".to_string(),
+                    line: alert_tok.line,
+                    column: alert_tok.column + alert_tok.length,
+                    length: 1,
+                    suggestion: "Pass the title and message in parentheses, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'alert' / 'info', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                    });
+                }
+
+                let title = self.parse_expr()?;
+
+                let comma_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected ',' separating title and message in alert/info call.".to_string(),
+                    line: alert_tok.line,
+                    column: alert_tok.column + alert_tok.length + 2,
+                    length: 1,
+                    suggestion: "Add a comma between arguments, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                })?;
+                if comma_mt.token == Token::Comma {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected ',' separating title and message in alert/info call, but found {}.", comma_mt.token.to_string_representation()),
+                        line: comma_mt.line,
+                        column: comma_mt.column,
+                        length: comma_mt.length,
+                        suggestion: "Separate arguments with a comma, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                    });
+                }
+
+                let message = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' at the end of alert/info call.".to_string(),
+                    line: alert_tok.line,
+                    column: alert_tok.column + alert_tok.length + 3,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' at the end of alert/info call, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'alert(\"Title\", \"Message\")'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::Alert {
+                    title: Box::new(title),
+                    message: Box::new(message),
+                })
+            }
+            Token::Window => {
+                let window_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'window' / 'fenster'.".to_string(),
+                    line: window_tok.line,
+                    column: window_tok.column + window_tok.length,
+                    length: 1,
+                    suggestion: "Pass the title, width, and height in parentheses, e.g., 'window(\"My Window\", 800, 600)'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'window' / 'fenster', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'window(\"My Window\", 800, 600)'.".to_string(),
+                    });
+                }
+
+                let title = self.parse_expr()?;
+
+                let comma1_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected ',' after window/fenster title.".to_string(),
+                    line: window_tok.line,
+                    column: window_tok.column + window_tok.length + 2,
+                    length: 1,
+                    suggestion: "Separate arguments with a comma, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                })?;
+                if comma1_mt.token == Token::Comma {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected ',' after window/fenster title, but found {}.", comma1_mt.token.to_string_representation()),
+                        line: comma1_mt.line,
+                        column: comma1_mt.column,
+                        length: comma1_mt.length,
+                        suggestion: "Separate arguments with a comma, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                    });
+                }
+
+                let width = self.parse_expr()?;
+
+                let comma2_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected ',' after window/fenster width.".to_string(),
+                    line: window_tok.line,
+                    column: window_tok.column + window_tok.length + 3,
+                    length: 1,
+                    suggestion: "Separate arguments with a comma, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                })?;
+                if comma2_mt.token == Token::Comma {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected ',' after window/fenster width, but found {}.", comma2_mt.token.to_string_representation()),
+                        line: comma2_mt.line,
+                        column: comma2_mt.column,
+                        length: comma2_mt.length,
+                        suggestion: "Separate arguments with a comma, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                    });
+                }
+
+                let height = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' at the end of window/fenster call.".to_string(),
+                    line: window_tok.line,
+                    column: window_tok.column + window_tok.length + 4,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' at the end of window/fenster call, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'window(\"Title\", 800, 600)'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::Window {
+                    title: Box::new(title),
+                    width: Box::new(width),
+                    height: Box::new(height),
+                })
             }
             _ => {
                 Err(ParseError {
