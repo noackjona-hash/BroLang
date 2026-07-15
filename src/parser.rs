@@ -36,6 +36,10 @@ pub enum Expr {
     Int(i64),
     Str(String),
     Var(String),
+    Input { id: usize },
+    Len(Box<Expr>),
+    Sleep(Box<Expr>),
+    Random,
     Binary {
         op: Op,
         left: Box<Expr>,
@@ -60,6 +64,7 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    Expr(Expr),
 }
 
 pub struct Program {
@@ -79,6 +84,7 @@ pub struct Parser<'a> {
     tokens: &'a [MetaToken],
     pos: usize,
     source_lines: &'a [String],
+    input_counter: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -87,6 +93,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             source_lines,
+            input_counter: 0,
         }
     }
 
@@ -338,13 +345,9 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::While { cond, body })
             }
             _ => {
-                Err(ParseError {
-                    message: format!("Unexpected token '{}' at start of statement.", mt.token.to_string_representation()),
-                    line: mt.line,
-                    column: mt.column,
-                    length: mt.length,
-                    suggestion: "Expected an instruction like variable assignment (set/setze), output (print/show/zeige), a loop (while/solange), or a conditional (if/wenn).".to_string(),
-                })
+                let expr = self.parse_expr()?;
+                self.expect_statement_end("expression statement")?;
+                Ok(Stmt::Expr(expr))
             }
         }
     }
@@ -465,6 +468,180 @@ impl<'a> Parser<'a> {
                         suggestion: "Replace this token with a closing parenthesis ')' or correct the syntax.".to_string(),
                     })
                 }
+            }
+            Token::Input => {
+                let input_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'input' / 'lese'.".to_string(),
+                    line: input_tok.line,
+                    column: input_tok.column + input_tok.length,
+                    length: 1,
+                    suggestion: "Write 'input()' or 'lese()' with parentheses.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'input' / 'lese', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Add '(' to call the function, e.g., 'input()'.".to_string(),
+                    });
+                }
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' after 'input(' / 'lese('.".to_string(),
+                    line: lp_mt.line,
+                    column: lp_mt.column + 1,
+                    length: 1,
+                    suggestion: "Complete the call with ')', e.g., 'input()'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' after 'input(' / 'lese(', but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Close the parentheses, e.g., 'input()'.".to_string(),
+                    });
+                }
+
+                let id = self.input_counter;
+                self.input_counter += 1;
+                Ok(Expr::Input { id })
+            }
+            Token::Len => {
+                let len_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'len' / 'laenge'.".to_string(),
+                    line: len_tok.line,
+                    column: len_tok.column + len_tok.length,
+                    length: 1,
+                    suggestion: "Pass a string in parentheses, e.g., 'len(s)'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'len' / 'laenge', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'len(my_string)'.".to_string(),
+                    });
+                }
+
+                let expr = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' after 'len' expression.".to_string(),
+                    line: len_tok.line,
+                    column: len_tok.column + len_tok.length + 1,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'len(my_string)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' after 'len' expression, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'len(my_string)'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::Len(Box::new(expr)))
+            }
+            Token::Sleep => {
+                let sleep_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'sleep' / 'warte'.".to_string(),
+                    line: sleep_tok.line,
+                    column: sleep_tok.column + sleep_tok.length,
+                    length: 1,
+                    suggestion: "Pass the time in milliseconds in parentheses, e.g., 'sleep(1000)'.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'sleep' / 'warte', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Use parentheses, e.g., 'sleep(1000)'.".to_string(),
+                    });
+                }
+
+                let expr = self.parse_expr()?;
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' after 'sleep' expression.".to_string(),
+                    line: sleep_tok.line,
+                    column: sleep_tok.column + sleep_tok.length + 1,
+                    length: 1,
+                    suggestion: "Add a closing parenthesis, e.g., 'sleep(1000)'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' after 'sleep' expression, but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Add a closing parenthesis, e.g., 'sleep(1000)'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::Sleep(Box::new(expr)))
+            }
+            Token::Random => {
+                let rand_tok = self.advance().unwrap().clone();
+                let lp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected '(' after 'random' / 'zufall'.".to_string(),
+                    line: rand_tok.line,
+                    column: rand_tok.column + rand_tok.length,
+                    length: 1,
+                    suggestion: "Write 'random()' or 'zufall()' with parentheses.".to_string(),
+                })?;
+                if lp_mt.token == Token::LParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected '(' after 'random' / 'zufall', but found {}.", lp_mt.token.to_string_representation()),
+                        line: lp_mt.line,
+                        column: lp_mt.column,
+                        length: lp_mt.length,
+                        suggestion: "Add '(' to call the function, e.g., 'random()'.".to_string(),
+                    });
+                }
+
+                let rp_mt = self.peek().cloned().ok_or_else(|| ParseError {
+                    message: "Expected closing parenthesis ')' after 'random(' / 'zufall('.".to_string(),
+                    line: lp_mt.line,
+                    column: lp_mt.column + 1,
+                    length: 1,
+                    suggestion: "Complete the call with ')', e.g., 'random()'.".to_string(),
+                })?;
+                if rp_mt.token == Token::RParen {
+                    self.advance();
+                } else {
+                    return Err(ParseError {
+                        message: format!("Expected closing parenthesis ')' after 'random(' / 'zufall(', but found {}.", rp_mt.token.to_string_representation()),
+                        line: rp_mt.line,
+                        column: rp_mt.column,
+                        length: rp_mt.length,
+                        suggestion: "Close the parentheses, e.g., 'random()'.".to_string(),
+                    });
+                }
+
+                Ok(Expr::Random)
             }
             _ => {
                 Err(ParseError {

@@ -6,6 +6,10 @@ pub enum Token {
     If,
     While,
     End,
+    Input,
+    Len,
+    Sleep,
+    Random,
     Ident(String),
     IntLit(i64),
     StrLit(String),
@@ -34,6 +38,10 @@ impl Token {
             Token::If => "if/wenn".to_string(),
             Token::While => "while/solange".to_string(),
             Token::End => "end/ende".to_string(),
+            Token::Input => "input/lese".to_string(),
+            Token::Len => "len/laenge".to_string(),
+            Token::Sleep => "sleep/warte".to_string(),
+            Token::Random => "random/zufall".to_string(),
             Token::Ident(s) => format!("identifier '{}'", s),
             Token::IntLit(n) => format!("integer literal '{}'", n),
             Token::StrLit(s) => format!("string literal \"{}\"", s),
@@ -200,6 +208,10 @@ impl Lexer {
                     "if" => Token::If,
                     "while" => Token::While,
                     "end" => Token::End,
+                    "input" => Token::Input,
+                    "len" => Token::Len,
+                    "sleep" => Token::Sleep,
+                    "random" => Token::Random,
 
                     // German keywords
                     "setze" => Token::Set,
@@ -208,6 +220,10 @@ impl Lexer {
                     "wenn" => Token::If,
                     "solange" => Token::While,
                     "ende" => Token::End,
+                    "lese" => Token::Input,
+                    "laenge" => Token::Len,
+                    "warte" => Token::Sleep,
+                    "zufall" => Token::Random,
 
                     // Generic Identifier
                     _ => Token::Ident(ident_str),
