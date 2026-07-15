@@ -1,95 +1,133 @@
 # BroLang Programming Language
 
-**BroLang** is a highly accessible, bilingual (English & German), compiled programming language designed specifically for beginners. It features a clean syntax, requires no semicolons, compiles to native high-performance machine code, and provides friendly, Rust/Elm-inspired error diagnostics.
+**BroLang** is a bilingual, typesafe, compiled programming language designed to make native systems programming and compiler engineering highly accessible to beginners. It compiles directly into standard 64-bit Windows x64 assembly (Flat Assembler - FASM) and translates statements into native machine code.
 
 ---
 
 ## Key Features
 
-* **Bilingual Syntax**: Write code in either English or German. Keyword equivalents are recognized interchangeably.
-* **No Semicolons**: Clean, modern statement layouts.
-* **Block Closures**: Structured blocks (conditionals, loops) terminate using `end` / `ende`.
-* **Static Type Checking**: Prevents variable type mismatches at compile time with helpful diagnostic suggestions.
-* **Friendly Diagnostics**: Rust/Elm-inspired error reports that print the exact source lines, point directly to the column of the error, and suggest fixes.
-* **Headerless Win64 ABI Native Assembly**: Generates raw PE64 Flat Assembler 2 (FASM 2) assembly code, automatically maintaining strict 16-byte stack alignments for nested expressions and calling convention routines.
-* **Built-in Systems & GUI Pop-ups**: Map directly to standard Windows DLL library functions (`MSVCRT.DLL`, `KERNEL32.DLL`, `USER32.DLL`) without any external dependencies.
+1. **Bilingual Keywords**: Swap between English and German keywords seamlessly. All compiler parts support interchangeable syntax equivalents.
+2. **Semicolon-Free & End Closures**: Statements require no trailing semicolons. Structuring closures end with `end` or `ende`.
+3. **Recursive Functions**: Full support for recursive function invocations (`fn`/`funktion`) using stack-relative calling frames and parameter bindings.
+4. **Target-Oriented Type Inference**: Resolves ambiguous types (such as `input()`) based on target assignment expressions. Emits strict compile-time errors for type mismatches.
+5. **Elm/Rust-Style Diagnostics**: Highlights the exact line, column, and span of parse/type errors, accompanied by friendly contextual suggestions.
+6. **Windows GUI & System Integration**: Direct bindings to `USER32.DLL`, `KERNEL32.DLL`, and `MSVCRT.DLL` to spawn graphical windows, trigger message box alerts, read input, and implement delays.
+7. **Clean FASM Assembly Generation**: Implements 16-byte stack frame alignment, shadow space reservation, and function namespace protection (`fn_`) to prevent collisions with assembly opcodes.
 
 ---
 
-## Syntax & Keywords Reference
+## Bilingual Keyword Reference
 
-| Feature | English Syntax | German Syntax | Under-the-hood System Call |
+| Feature | English Keyword | German Keyword | FASM / Windows ABI Execution |
 | :--- | :--- | :--- | :--- |
-| **Assignment** | `set [var] to [expr]` | `setze [var] auf [expr]` | Variable allocation (`dq`) |
-| **Output** | `print [expr]` / `show([expr])` | `zeige [expr]` / `zeige([expr])` | `printf` from `MSVCRT.DLL` |
-| **Conditionals** | `if [expr] ... end` | `wenn [expr] ... ende` | Jump instructions (`je`/`jne`) |
-| **Loops** | `while [expr] ... end` | `solange [expr] ... ende` | Jump and Loop logic |
-| **Input** | `set name to input()` | `setze name auf lese()` | `scanf` from `MSVCRT.DLL` (reads `%s` or `%lld` contextually) |
-| **Length** | `len(my_string)` | `laenge(my_string)` | `strlen` from `MSVCRT.DLL` |
-| **Sleep** | `sleep(1500)` | `warte(500)` | `Sleep` from `KERNEL32.DLL` |
-| **Random** | `set r to random()` | `setze r auf zufall()` | `rand` from `MSVCRT.DLL` |
-| **Alert Popup** | `alert("Title", "Message")` | `info("Titel", "Nachricht")` | `MessageBoxA` from `USER32.DLL` |
-| **Window Frame** | `window("Title", 800, 600)` | `fenster("Titel", 800, 600)` | `CreateWindowExA` & Event message loops from `USER32.DLL` |
+| **Declaration** | `set [var] to [val]` | `setze [var] auf [val]` | Stack/data relative value binding |
+| **Output** | `print [expr]` / `show([expr])` | `zeige [expr]` / `zeige([expr])` | `printf` (`MSVCRT.DLL`) |
+| **Conditionals** | `if [cond] ... end` | `wenn [cond] ... ende` | Compare and Jump labels |
+| **Looping** | `while [cond] ... end` | `solange [cond] ... ende` | Jump-based looping |
+| **Function Definition**| `fn [name](params) ... end`| `funktion [name](params) ... ende`| Assembly procedure blocks (`fn_name`) |
+| **Returns** | `return [expr]` | `rueckgabe [expr]` / `zurueck` | Value returned in `rax` register |
+| **Input** | `input()` | `lese()` | `scanf` (`MSVCRT.DLL`) |
+| **Length** | `len(str)` | `laenge(str)` | `strlen` (`MSVCRT.DLL`) |
+| **Delay** | `sleep(ms)` | `warte(ms)` | `Sleep` (`KERNEL32.DLL`) |
+| **Random** | `random()` | `zufall()` | `rand` (`MSVCRT.DLL`) |
+| **Alert Box** | `alert(title, msg)` | `info(titel, nachricht)` | `MessageBoxA` (`USER32.DLL`) |
+| **Windows GUI** | `window(t, w, h)` | `fenster(t, w, h)` | `CreateWindowExA` & loop (`USER32.DLL`)|
 
 ---
 
-## Codebase Architecture
+## Global CLI Installation
 
-The compiler is structured as a modular Rust binary crate:
+BroLang comes with an automated PowerShell installer script that sets up the compiler and assembler globally on your system.
 
-* **[src/lexer.rs](file:///c:/projects/language/src/lexer.rs)**: Tokenizes source files, tracking precise `line`, `column`, and `length` coordinates for every single token.
-* **[src/parser.rs](file:///c:/projects/language/src/parser.rs)**: Parses the token stream into an Abstract Syntax Tree (AST), handling mathematical operator precedence and emitting Elm-inspired syntax errors.
-* **[src/codegen.rs](file:///c:/projects/language/src/codegen.rs)**: Performs semantic type checking (mapping target types and variable definitions) and generates self-contained raw PE64 assembly code.
-* **[src/main.rs](file:///c:/projects/language/src/main.rs)**: Serves as the CLI orchestration driver. Writes generated assembly to `output.asm` and automatically invokes `fasm2` to produce a standalone executable (`output.exe`).
+### 1. Run the Installer
+Open PowerShell inside the repository directory and run the installer script:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**What the installer does:**
+1. Compiles the compiler in release mode (`cargo build --release`).
+2. Creates a user-local directory at `C:\Users\<YourUser>\.brolang\bin`.
+3. Copies the compiled compiler `bro.exe` to that folder.
+4. Downloads the official Flat Assembler zip, extracts the compiler executable, and copies/renames it to `fasm2.exe` in the same directory.
+5. Adds the bin folder to the current user's registry `PATH` variable.
+
+### 2. Reload Environment Path (Optional)
+To use the `bro` command immediately in your *current* terminal session without restarting, reload the environment path:
+```powershell
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+```
+
+### 3. Verify the Installation
+Run:
+```bash
+bro --version
+```
+Output:
+```text
+BroLang Compiler v1.0.0
+```
 
 ---
 
-## Getting Started
+## Compilation Usage
 
-### 1. Build the Compiler
-Build the Rust project using Cargo:
+Compile and run any `.bro` script from any folder in your terminal:
 ```bash
-cargo build --release
+bro my_program.bro
 ```
-
-### 2. Compile a BroLang Program
-Compile any BroLang script (e.g. English, German, or GUI programs):
-```bash
-cargo run -- test/test_nest.bro
-```
-This generates `output.asm` and attempts to compile it into `output.exe` if `fasm2` is available on the system path.
-
-### 3. Assemble Manually
-If FASM 2 is not on your environment's path, assemble the generated `output.asm` manually:
-```bash
-fasm2 output.asm output.exe
-```
+This automatically parses, type-checks, generates `output.asm`, and invokes the bundled `fasm2.exe` to compile a standalone, native, high-performance Windows executable `output.exe`!
 
 ---
 
 ## Code Examples
 
-### English Counter & Input Nesting
+### 1. English Recursive Fibonacci
 ```python
-# Read name and print hello
-print "Enter your name:"
-set name to input()
-print "Hello,"
-print name
-
-# Loop countdown
-set counter to 5
-while counter > 0
-  print counter
-  set counter to counter - 1
+# Compute the 6th Fibonacci number
+fn fib(n)
+    if n <= 1
+        return n
+    end
+    set a to fib(n - 1)
+    set b to fib(n - 2)
+    return a + b
 end
+
+print fib(6)
 ```
 
-### German GUI alert & Window
+### 2. German Graphical Window and Pop-up
 ```python
-# Show an information box
-info("BroLang Info", "Gleich oeffnet sich ein Fenster!")
+# Spawns a native Windows Alert Info Box
+info("BroLang Info", "Gleich oeffnet sich ein 800x600 Fenster!")
 
-# Create a visible Win32 window (blocks until closed)
+# Spawns a graphic frame. Clicking "X" exits the program cleanly.
 fenster("Mein BroLang Fenster", 800, 600)
 ```
+
+---
+
+## Compiler Design Deep-Dive
+
+### 1. Recursive Stack Frame Layout
+To support recursive function executions, variables are stored locally on the stack rather than globally.
+* **Procedures**: Each `fn`/`funktion` compiles to a FASM label prefixed with `fn_` (e.g. `fn_fib`) to prevent collisions with FASM opcodes (such as `add`).
+* **Frame Pointer**: The function prologue sets up the frame pointer (`rbp`):
+  ```assembly
+  push rbp
+  mov rbp, rsp
+  sub rsp, 48   # Allocates local variables + shadow space, maintaining 16-byte alignment
+  ```
+* **Parameters**: Copied from registers to caller shadow space relative to `rbp`:
+  * Parameter 1 (`RCX`) -> `[rbp + 16]`
+  * Parameter 2 (`RDX`) -> `[rbp + 24]`
+  * Parameter 3 (`R8`)  -> `[rbp + 32]`
+  * Parameter 4 (`R9`)  -> `[rbp + 40]`
+  * Parameters 5+ are read from stack offsets `[rbp + 48]`, `[rbp + 56]`, etc.
+* **Locals**: Function-scoped local variables are allocated negative RBP offsets, e.g. `[rbp - 8]`, `[rbp - 16]`.
+
+### 2. 16-byte Stack Alignment
+Before invoking any external Win32/MSVCRT function, the Windows x64 ABI requires the stack pointer (`RSP`) to be aligned to a 16-byte boundary. The compiler tracks stack operations (pushes/pops) dynamically:
+* If the stack depth is odd, it pads with `sub rsp, 8` before function `call` instructions, and restores it with `add rsp, 8` after return.
+* Win32 event loops are fully optimized and stack-padded during window callbacks.

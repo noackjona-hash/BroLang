@@ -6,73 +6,59 @@ section '.data' data readable writeable
   fmt_str db '%s', 13, 10, 0
   fmt_int_in db '%lld', 0
   fmt_str_in db '%s', 0
+  str_lit_1 db 'Hello from Windows GUI!', 0
+  str_lit_0 db 'BroLang Alert', 0
+  window_class_name db 'BroLangWndClass', 0
+  msg_struct rb 48
+  wnd_class:
+    wc_style         dd 0
+                     dd 0 ; alignment
+    wc_lpfnWndProc   dq rva window_proc
+    wc_cbClsExtra    dd 0
+    wc_cbWndExtra    dd 0
+    wc_hInstance     dq 0
+    wc_hIcon         dq 0
+    wc_hCursor       dq 0
+    wc_hbrBackground dq 6
+    wc_lpszMenuName  dq 0
+    wc_lpszClassName dq window_class_name
 
 section '.text' code readable executable
 start:
-  sub rsp, 40
+  sub rsp, 104
 
-  mov rax, 6
+  ; Register Win32 Class
+  mov rcx, wnd_class
+  call [RegisterClassA]
+
+  mov rax, str_lit_0
   push rax
-  pop rcx
-  call fn_fib
+  mov rax, str_lit_1
+  pop r10
   mov rdx, rax
-  mov rcx, fmt_int
-  call [printf]
+  mov r8, r10
+  mov rcx, 0
+  mov r9, 0
+  call [MessageBoxA]
   mov rcx, 0
   call [ExitProcess]
 
-fn_fib:
-  push rbp
-  mov rbp, rsp
-  sub rsp, 48
-  mov [rbp + 16], rcx
-  mov rax, [rbp + 16]
-  push rax
-  mov rax, 1
-  pop r10
-  cmp r10, rax
-  setle al
-  movzx rax, al
-  cmp rax, 0
-  je .L_end_0
-  mov rax, [rbp + 16]
-  jmp .L_epilogue_fib
-.L_end_0:
-  mov rax, [rbp + 16]
-  push rax
-  mov rax, 1
-  pop r10
-  sub r10, rax
-  mov rax, r10
-  push rax
-  pop rcx
-  call fn_fib
-  mov [rbp - 8], rax
-  mov rax, [rbp + 16]
-  push rax
-  mov rax, 2
-  pop r10
-  sub r10, rax
-  mov rax, r10
-  push rax
-  pop rcx
-  call fn_fib
-  mov [rbp - 16], rax
-  mov rax, [rbp - 8]
-  push rax
-  mov rax, [rbp - 16]
-  pop r10
-  add rax, r10
-  jmp .L_epilogue_fib
-.L_epilogue_fib:
-  mov rsp, rbp
-  pop rbp
+window_proc:
+  cmp rdx, 2 ; WM_DESTROY
+  je .L_destroy_wnd
+  sub rsp, 40
+  call [DefWindowProcA]
+  add rsp, 40
   ret
+.L_destroy_wnd:
+  mov rcx, 0
+  call [ExitProcess]
 
 section '.idata' import data readable
 
   dd rva kernel32_lookup, 0, 0, rva kernel32_name, rva kernel32_address
   dd rva msvcrt_lookup, 0, 0, rva msvcrt_name, rva msvcrt_address
+  dd rva user32_lookup, 0, 0, rva user32_name, rva user32_address
   dd 0, 0, 0, 0, 0
 
   kernel32_lookup:
@@ -99,8 +85,29 @@ section '.idata' import data readable
     rand        dq rva msvcrt_rand
     dq 0
 
+  user32_lookup:
+    dq rva user32_MessageBoxA
+    dq rva user32_RegisterClassA
+    dq rva user32_CreateWindowExA
+    dq rva user32_DefWindowProcA
+    dq rva user32_GetMessageA
+    dq rva user32_TranslateMessage
+    dq rva user32_DispatchMessageA
+    dq 0
+
+  user32_address:
+    MessageBoxA      dq rva user32_MessageBoxA
+    RegisterClassA   dq rva user32_RegisterClassA
+    CreateWindowExA  dq rva user32_CreateWindowExA
+    DefWindowProcA   dq rva user32_DefWindowProcA
+    GetMessageA      dq rva user32_GetMessageA
+    TranslateMessage dq rva user32_TranslateMessage
+    DispatchMessageA dq rva user32_DispatchMessageA
+    dq 0
+
   kernel32_name db 'KERNEL32.DLL', 0
   msvcrt_name   db 'MSVCRT.DLL', 0
+  user32_name   db 'USER32.DLL', 0
 
   kernel32_ExitProcess dw 0
                        db 'ExitProcess', 0
@@ -116,3 +123,17 @@ section '.idata' import data readable
   msvcrt_rand          dw 0
                        db 'rand', 0
 
+  user32_MessageBoxA      dw 0
+                          db 'MessageBoxA', 0
+  user32_RegisterClassA   dw 0
+                          db 'RegisterClassA', 0
+  user32_CreateWindowExA  dw 0
+                          db 'CreateWindowExA', 0
+  user32_DefWindowProcA   dw 0
+                          db 'DefWindowProcA', 0
+  user32_GetMessageA      dw 0
+                          db 'GetMessageA', 0
+  user32_TranslateMessage dw 0
+                          db 'TranslateMessage', 0
+  user32_DispatchMessageA dw 0
+                          db 'DispatchMessageA', 0
